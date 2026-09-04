@@ -15,12 +15,18 @@
  */
 
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
-const { initializeApp } = require('firebase-admin/app');
+const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
 const { getAuth } = require('firebase-admin/auth');
 const crypto = require('crypto');
 
-initializeApp();
+const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+if (!getApps().length) {
+  if (rawServiceAccount) {
+    const serviceAccount = JSON.parse(rawServiceAccount);
+    initializeApp({ credential: cert(serviceAccount), projectId: serviceAccount.project_id });
+  } else { initializeApp(); }
+}
 const db = getFirestore();
 const APP_ID = 'iis-levi-electoral-v3';
 const REGION = 'europe-west1';
