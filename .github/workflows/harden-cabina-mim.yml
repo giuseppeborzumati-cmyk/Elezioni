@@ -1,0 +1,43 @@
+name: Hardening cabina elettorale MIM
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/harden-cabina-mim.yml"
+      - "scripts/harden_cabina_mim.py"
+permissions:
+  contents: write
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Congela librerie terze nel repository
+        run: |
+          mkdir -p vendor
+          curl -fsSL https://cdn.tailwindcss.com -o vendor/tailwindcss.js
+          curl -fsSL https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js -o vendor/xlsx.full.min.js
+          curl -fsSL https://unpkg.com/lucide@1.34.0/dist/umd/lucide.min.js -o vendor/lucide.min.js
+          curl -fsSL https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js -o vendor/jspdf.umd.min.js
+          curl -fsSL https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.29/jspdf.plugin.autotable.min.js -o vendor/jspdf.plugin.autotable.min.js
+          curl -fsSL https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js -o vendor/jszip.min.js
+      - name: Applica hardening HTML
+        run: python3 scripts/harden_cabina_mim.py
+      - name: Verifica minima
+        run: |
+          grep -q 'privacy-shield' index.html
+          grep -q 'vendor/tailwindcss.js' index.html
+          grep -q 'Cabina protetta' index.html
+          grep -q 'MODALITÀ DI PROVA / COLLAUDO' index.html
+          test -s vendor/tailwindcss.js
+          test -s vendor/xlsx.full.min.js
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html 404.html vendor/
+          git diff --cached --quiet && exit 0
+          git commit -m "Hardening cabina elettorale e dipendenze locali MIM 2026"
+          git push
