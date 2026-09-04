@@ -1,0 +1,45 @@
+name: Hardening finale MIM 2026
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "scripts/finalize_mim_hardening.py"
+      - ".github/workflows/harden-mim-final.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Applica hardening finale
+        run: python3 scripts/finalize_mim_hardening.py
+      - name: Controlli statici minimi
+        run: |
+          set -euo pipefail
+          grep -q "RIENTRA NELLA CABINA PROTETTA" index.html
+          grep -q "Gate MIM 2026" index.html
+          grep -q "bloccaSmartphoneReali: true" index.html
+          grep -q "Modalità reale BLOCCATA" index.html
+          grep -q "default-src 'self';" index.html
+          ! grep -q "cdn.tailwindcss.com" index.html
+          ! grep -q "cdnjs.cloudflare.com" index.html
+          ! grep -q "unpkg.com" index.html
+          cmp -s index.html 404.html
+      - name: Commit hardening
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html 404.html
+          if git diff --cached --quiet; then
+            echo "Nessuna modifica necessaria"
+            exit 0
+          fi
+          git commit -m "Completa hardening MIM, cabina e gate produzione"
+          git push
