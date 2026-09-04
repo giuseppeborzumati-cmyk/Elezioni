@@ -3,8 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' https:; script-src 'self' 'unsafe-inline' vendor/tailwindcss.js https://cdnjs.cloudflare.com https://unpkg.com https://www.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.cloudfunctions.net https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://elezioni-primo-levi-vercel.vercel.app; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; upgrade-insecure-requests">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://www.gstatic.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: https:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.cloudfunctions.net https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://elezioni-primo-levi-vercel.vercel.app; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; frame-src 'none'; child-src 'none'; media-src 'none'; form-action 'self'; upgrade-insecure-requests">
     <meta name="referrer" content="no-referrer">
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <meta name="robots" content="noindex,nofollow">
     <title>Piattaforma Elettorale Unificata - ITSCG Primo Levi</title>
     
@@ -21,10 +24,8 @@
     <script src="vendor/jszip.min.js"></script>
 
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
-        
         body { 
-            font-family: 'Inter', sans-serif; 
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
             background-color: #f8fafc; 
             overflow-x: hidden; 
             min-height: 100vh;
@@ -165,6 +166,8 @@
                 La cabina è stata oscurata perché la finestra ha perso il focus, è stato richiesto un tentativo di stampa/cattura
                 oppure è stata abbandonata la modalità protetta. Torna alla finestra elettorale per proseguire.
             </p>
+            <button onclick="enterProtectedCabin()" class="mt-6 px-5 py-3 rounded-xl bg-white text-slate-950 font-black text-sm shadow-lg">RIENTRA NELLA CABINA PROTETTA</button>
+            <p class="mt-3 text-[10px] text-slate-400">Il browser applica misure di deterrenza; una fotografia effettuata con un dispositivo esterno richiede comunque postazione controllata e misure fisiche/organizzative.</p>
         </div>
     </div>
     <div class="secure-watermark" aria-hidden="true"></div>
@@ -379,7 +382,7 @@
     <footer class="bg-slate-900 text-slate-400 p-4 text-center text-[10px] border-t border-slate-800 z-10">
         <div class="container mx-auto space-y-1">
             <p class="font-bold text-slate-300">Sistema Elettorale Digitale ITSCG "Primo Levi" Seregno</p>
-            <p>Sistema predisposto secondo requisiti MIM • Segretezza e separazione identità/voto verificate lato server</p>
+            <p>Sistema sottoposto a controlli tecnici secondo Allegato MIM 2026 • Idoneità finale subordinata a collaudo, verifiche privacy/DPO e documentazione dei fornitori</p>
         </div>
     </footer>
 
@@ -479,6 +482,8 @@
         let configElezioni = {
             annoScolastico: "2026/2027",
             modalitaProva: false,
+            bloccaSmartphoneReali: true,
+            mimCompliance: {},
             tipologiaElezioni: "Elezioni Organi Collegiali d'Istituto + Rappresentanti di Classe + Consulta",
             consiglioAttivo: true,
             consultaAttiva: true,
@@ -572,6 +577,7 @@
         // --- Protezioni della cabina elettorale (best effort browser-side) ---
         let privacyShieldTimer = null;
         let protectedFullscreenRequested = false;
+        let protectedCabinEntered = false;
 
         function isSensitiveVotingView() {
             return ['votoConsiglio','votoIstituto','votoConsulta','votoClasseStudenti','votoClasseGenitori','riepilogo'].includes(String(currentView || ''));
@@ -582,6 +588,12 @@
             document.body.classList.toggle('secure-ballot-active', active);
             const btn = document.getElementById('secure-cabin-button');
             if (btn) btn.classList.toggle('hidden', !active);
+            if (active && !protectedCabinEntered) showPrivacyShield('enter-sensitive-view');
+            if (!active) {
+                protectedCabinEntered = false;
+                protectedFullscreenRequested = false;
+                document.getElementById('privacy-shield')?.classList.remove('active');
+            }
         }
 
         function showPrivacyShield(reason = 'privacy') {
@@ -589,16 +601,17 @@
             const el = document.getElementById('privacy-shield');
             if (!el) return;
             el.dataset.reason = reason;
+            protectedCabinEntered = false;
             el.classList.add('active');
         }
 
-        function hidePrivacyShieldSoon() {
+        function hidePrivacyShieldSoon(force = false) {
             clearTimeout(privacyShieldTimer);
             privacyShieldTimer = setTimeout(() => {
-                if (document.visibilityState === 'visible' && document.hasFocus()) {
+                if ((force || protectedCabinEntered) && document.visibilityState === 'visible' && document.hasFocus()) {
                     document.getElementById('privacy-shield')?.classList.remove('active');
                 }
-            }, 450);
+            }, 150);
         }
 
         window.enterProtectedCabin = async function() {
@@ -607,7 +620,8 @@
                     await document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
                 }
                 protectedFullscreenRequested = true;
-                hidePrivacyShieldSoon();
+                protectedCabinEntered = true;
+                hidePrivacyShieldSoon(true);
                 showNotification('Cabina protetta attiva',
                     'Modalità a schermo intero attivata. Screenshot e fotografie esterne non possono essere garantiti dal browser: usare una postazione sorvegliata e senza telefoni esterni.',
                     'info');
@@ -616,23 +630,23 @@
 
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState !== 'visible') showPrivacyShield('visibilitychange');
-            else hidePrivacyShieldSoon();
+            else { /* resta oscurato finché l’elettore non rientra esplicitamente */ }
         });
         window.addEventListener('blur', () => showPrivacyShield('blur'));
-        window.addEventListener('focus', hidePrivacyShieldSoon);
+        window.addEventListener('focus', () => { /* nessun auto-sblocco */ });
         document.addEventListener('fullscreenchange', () => {
             if (protectedFullscreenRequested && isSensitiveVotingView() && !document.fullscreenElement) {
                 showPrivacyShield('fullscreen-exit');
             }
         });
         window.addEventListener('beforeprint', () => showPrivacyShield('print'));
-        window.addEventListener('afterprint', hidePrivacyShieldSoon);
+        window.addEventListener('afterprint', () => showPrivacyShield('afterprint'));
 
         document.addEventListener('contextmenu', (e) => {
-            if (isSensitiveVotingView()) { e.preventDefault(); showPrivacyShield('contextmenu'); hidePrivacyShieldSoon(); }
+            if (isSensitiveVotingView()) { e.preventDefault(); showPrivacyShield('contextmenu'); }
         }, true);
         document.addEventListener('copy', (e) => {
-            if (isSensitiveVotingView()) { e.preventDefault(); showPrivacyShield('copy'); hidePrivacyShieldSoon(); }
+            if (isSensitiveVotingView()) { e.preventDefault(); showPrivacyShield('copy'); }
         }, true);
         document.addEventListener('cut', (e) => {
             if (isSensitiveVotingView()) { e.preventDefault(); }
@@ -649,11 +663,10 @@
             if (blocked) {
                 e.preventDefault(); e.stopPropagation();
                 showPrivacyShield('capture-key');
-                hidePrivacyShieldSoon();
             }
         }, true);
         navigator.mediaDevices?.addEventListener?.('devicechange', () => {
-            if (isSensitiveVotingView()) hidePrivacyShieldSoon();
+            if (isSensitiveVotingView()) showPrivacyShield('devicechange');
         });
 
         let currentAccordionSection = 'consiglio';
@@ -983,7 +996,7 @@
                     <div class="mb-6 flex flex-col items-center">
                         <img src="levi.png" alt="Primo Levi Logo" onerror="this.src='https://placehold.co/100x100/1e3a8a/ffffff?text=LEVI'" class="w-16 h-16 object-contain mb-4">
                         <h2 class="text-xl font-black text-slate-800">Entra in Cabina Elettorale</h2>
-                        <p class="text-slate-500 text-xs mt-1">Digita il codice segreto (Token) per votare dal tuo dispositivo.</p>
+                        <p class="text-slate-500 text-xs mt-1">Digita il codice segreto (Token) esclusivamente dalla postazione autorizzata predisposta per la votazione.</p>
                         <p class="text-[10px] text-blue-900 bg-blue-50 px-2 py-0.5 rounded mt-2 font-bold">Anno Scolastico Attivo: A.S. ${configElezioni.annoScolastico}</p>
                         <p class="text-[10px] text-slate-500 mt-2 font-semibold">Votazioni: ${configElezioni.calendario?.votingStartDate || 'XX/10/2026'} ${configElezioni.calendario?.votingStartTime || 'XX:XX'} → ${configElezioni.calendario?.votingEndDate || 'XX/10/2026'} ${configElezioni.calendario?.votingEndTime || 'XX:XX'}</p>
                     </div>
@@ -1004,11 +1017,19 @@
             lucide.createIcons();
         }
 
+        function isLikelyPersonalSmartphone() {
+            const ua = String(navigator.userAgent || '');
+            const mobile = /Android|iPhone|iPod|Windows Phone|IEMobile|Opera Mini/i.test(ua);
+            const ipadDesktopMode = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+            return mobile && !ipadDesktopMode;
+        }
+
         window.handleStudentLogin = async function() {
             const token = document.getElementById('tokenInput').value.trim().toUpperCase();
             const errEl = document.getElementById('loginError');
             errEl.classList.add('hidden');
             if (!token) { errEl.textContent='Inserisci il Token.'; errEl.classList.remove('hidden'); return; }
+            if (!configElezioni.modalitaProva && configElezioni.bloccaSmartphoneReali !== false && isLikelyPersonalSmartphone()) { errEl.textContent='Per la votazione reale è richiesta una postazione autorizzata dell’Istituto. Il voto da smartphone personale è bloccato.'; errEl.classList.remove('hidden'); return; }
             const btn=document.getElementById('loginBtn'); btn.innerHTML=`<div class="spinner mr-2"></div> Convalida in corso...`;
             try {
                 if(!configElezioni.modalitaProva) {
@@ -2156,6 +2177,64 @@
             try { localStorage.setItem('levi-election-test-log', JSON.stringify(rows.slice(-50))); } catch(e) {}
         }
 
+
+        const MIM_PRODUCTION_CONTROLS = Object.freeze({
+            dpiaCompleted: 'DPIA / valutazione con il DPO formalizzata e acquisita agli atti',
+            providerDocumentationAcquired: 'Documentazione tecnica e contrattuale dei fornitori cloud acquisita',
+            cloudDataLocationReviewed: 'Localizzazione, trasferimenti e ruoli privacy dei dati verificati',
+            metadataUnlinkabilityReviewed: 'Verifica documentata che log/metadati non consentano correlazione identità-voto',
+            structuralSeparationReviewed: 'Separazione strutturale autenticazione/urna verificata e verbalizzata',
+            testEnvironmentSeparated: 'Ambiente di collaudo separato logicamente dalla produzione',
+            controlledDevicesReady: 'Postazioni scolastiche controllate / kiosk e divieto di dispositivi personali predisposti',
+            restoreTestDocumented: 'Backup e prova di ripristino eseguiti e verbalizzati',
+            agidConservationPlanApproved: 'Verbali, evidenze, hash e conservazione documentale secondo procedura AgID predisposti',
+            providerSecurityReviewed: 'Misure di sicurezza, audit, incident response e continuità dei fornitori riesaminate'
+        });
+
+        function mimComplianceState() {
+            return { ...(configElezioni.mimCompliance || {}) };
+        }
+
+        function mimProductionMissing() {
+            const state = mimComplianceState();
+            return Object.keys(MIM_PRODUCTION_CONTROLS).filter(k => state[k] !== true);
+        }
+
+        window.updateMimComplianceControl = async function(control, value) {
+            if (!Object.prototype.hasOwnProperty.call(MIM_PRODUCTION_CONTROLS, control)) return;
+            if (!auth.currentUser) return showNotification('Autenticazione richiesta','Accedere come Commissione.','error');
+            const previous = { ...(configElezioni.mimCompliance || {}) };
+            configElezioni.mimCompliance = { ...previous, [control]: value === true, updatedAt: new Date().toISOString() };
+            try {
+                await SECURE_API.saveElectionConfig({ config: configElezioni, annoScolastico: configElezioni.annoScolastico });
+                window.configElezioni = configElezioni;
+                renderCollaudoTab(document.getElementById('admin-tab-content'));
+            } catch (e) {
+                configElezioni.mimCompliance = previous;
+                showNotification('Controllo MIM non salvato', e?.message || 'Operazione non completata.', 'error');
+            }
+        };
+
+        async function verifyProductionReadiness() {
+            const errors = [];
+            try {
+                const h = await fetch('https://elezioni-primo-levi-vercel.vercel.app/api/health', { cache:'no-store' });
+                const j = await h.json();
+                if (!h.ok || j.ok !== true || j.backend !== true || j.firebase !== true) errors.push('Backend/Firebase non risulta verde.');
+            } catch (e) { errors.push('Backend/Firebase non raggiungibile.'); }
+            try {
+                const r = await SECURE_API.getRegularityState({ annoScolastico: configElezioni.annoScolastico });
+                if (r.data?.readyForVoting !== true) {
+                    const missing = Array.isArray(r.data?.missing) ? r.data.missing.join(', ') : 'controlli incompleti';
+                    errors.push('Regolarità elettorale incompleta: ' + missing + '.');
+                }
+            } catch (e) { errors.push('Impossibile verificare i controlli di regolarità.'); }
+            const mimMissing = mimProductionMissing();
+            if (mimMissing.length) errors.push('Checklist MIM incompleta: ' + mimMissing.map(k => MIM_PRODUCTION_CONTROLS[k]).join(' · '));
+            if (configElezioni.bloccaSmartphoneReali === false) errors.push('Blocco best-effort smartphone reali disattivato.');
+            return { ok: errors.length === 0, errors };
+        }
+
         function renderCollaudoTab(container) {
             const active = configElezioni.modalitaProva === true;
             const log = readElectionTestLog();
@@ -2209,6 +2288,13 @@
                         <div class="mt-3 text-xs text-slate-700">Prove completate su questo dispositivo: <b>${log.length}</b>${last ? ` — ultima: ${new Date(last.at).toLocaleString('it-IT')}` : ''}</div>
                     </div>
 
+                    <div class="bg-white rounded-2xl border-2 border-blue-200 p-5">
+                        <div class="flex items-start justify-between gap-4 mb-3"><div><h4 class="font-black text-blue-950 text-sm">Gate MIM 2026 — documentazione e ambiente reale</h4><p class="text-[10px] text-slate-500 mt-1">Una voce va confermata solo dopo verifica documentale/tecnica reale. Il codice non sostituisce DPO, atti dell’Istituto o documentazione dei fornitori.</p></div><span class="text-[10px] font-black px-2 py-1 rounded ${mimProductionMissing().length ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'}">${mimProductionMissing().length ? mimProductionMissing().length + ' MANCANTI' : 'COMPLETO'}</span></div>
+                        <div class="grid md:grid-cols-2 gap-2">
+                            ${Object.entries(MIM_PRODUCTION_CONTROLS).map(([k,label]) => `<label class="flex gap-2 items-start p-3 rounded-xl border ${mimComplianceState()[k]===true?'bg-emerald-50 border-emerald-200':'bg-slate-50'}"><input type="checkbox" class="mt-0.5" ${mimComplianceState()[k]===true?'checked':''} onchange="updateMimComplianceControl('${k}',this.checked)"><span class="text-[10px] font-bold text-slate-800">${label}</span></label>`).join('')}
+                        </div>
+                    </div>
+
                     <div class="bg-slate-900 text-white rounded-2xl p-5">
                         <h4 class="font-black text-sm mb-3">Checklist prima dell'attivazione reale</h4>
                         <div class="grid md:grid-cols-2 gap-x-6 gap-y-2 text-xs">
@@ -2230,6 +2316,13 @@
 
         window.setElectionTestMode = async function(enabled) {
             if (!auth.currentUser) return showNotification('Autenticazione richiesta','Accedere come Commissione per modificare la modalità di esercizio.','error');
+            if (enabled !== true) {
+                const readiness = await verifyProductionReadiness();
+                if (!readiness.ok) {
+                    return showNotification('Modalità reale BLOCCATA', readiness.errors.join(' | '), 'error');
+                }
+                if (!window.confirm('Tutti i controlli tecnici, MIM, privacy/DPO e organizzativi risultano completati. Confermare il passaggio alla MODALITÀ REALE?')) return;
+            }
             const previous = configElezioni.modalitaProva === true;
             configElezioni.modalitaProva = enabled === true;
             configElezioni.modalitaProvaUpdatedAt = new Date().toISOString();
