@@ -34,11 +34,6 @@ jobs:
           test -f "$ROOT/functions/index.js"
           test -f "$ROOT/firestore.rules"
 
-          if [ -f .bootstrap/final_nonworkflow.patch.gz.b64 ]; then
-            base64 --decode .bootstrap/final_nonworkflow.patch.gz.b64 | gzip -d > /tmp/final.patch
-            (cd "$ROOT" && patch -p1 < /tmp/final.patch)
-          fi
-
           rm -rf functions docs tests
           cp -a "$ROOT/functions" ./functions
           cp -a "$ROOT/docs" ./docs
