@@ -1,0 +1,1 @@
+File temporaneo di verifica: il sito usa index.html nella root del branch main.
