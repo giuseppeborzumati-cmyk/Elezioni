@@ -341,32 +341,34 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
         const functions = getFunctions(app, "europe-west1");
-
-        // Nessun segreto amministrativo è incorporato nel browser.
-
-        const SECURE_API = Object.freeze({
-            validateVoterToken: httpsCallable(functions, 'validateVoterToken'),
-            castVote: httpsCallable(functions, 'castVote'),
-            commissionLogin: httpsCallable(functions, 'commissionLogin'),
-            changeCommissionPassword: httpsCallable(functions, 'changeCommissionPassword'),
-            managementLogin: httpsCallable(functions, 'managementLogin'),
-            referentLogin: httpsCallable(functions, 'referentLogin'),
-            getAnonymousBallots: httpsCallable(functions, 'getAnonymousBallots'),
-            createStaffAccount: httpsCallable(functions, 'createStaffAccount'),
-            getStaffAccounts: httpsCallable(functions, 'getStaffAccounts'),
-            setStaffAccountActive: httpsCallable(functions, 'setStaffAccountActive'),
-            saveElectionConfig: httpsCallable(functions, 'saveElectionConfig'),
-            ensureReferentKeys: httpsCallable(functions, 'ensureReferentKeys'),
-            getSecurityStatus: httpsCallable(functions, 'getSecurityStatus'),
-            getRegularityState: httpsCallable(functions, 'getRegularityState'),
-            setRegularityControl: httpsCallable(functions, 'setRegularityControl'),
-            recordResultsPublication: httpsCallable(functions, 'recordResultsPublication'),
-            fileElectoralAppeal: httpsCallable(functions, 'fileElectoralAppeal'),
-            resolveElectoralAppeal: httpsCallable(functions, 'resolveElectoralAppeal'),
-            recordElectoralIncident: httpsCallable(functions, 'recordElectoralIncident'),
-            setEmergencySuspension: httpsCallable(functions, 'setEmergencySuspension'),
-            closeElectoralProcedure: httpsCallable(functions, 'closeElectoralProcedure'),
-            destructiveAction: httpsCallable(functions, 'destructiveAction')
+        // Backend server-side eseguito su Vercel: nessun segreto nel browser.
+        const SECURE_API = new Proxy({}, {
+            get: (_, functionName) => async (data = {}) => {
+                const headers = { 'Content-Type': 'application/json' };
+                if (auth.currentUser) {
+                    const idToken = await auth.currentUser.getIdToken();
+                    headers.Authorization = `Bearer ${idToken}`;
+                }
+                let response;
+                try {
+                    response = await fetch('/api/call', {
+                        method: 'POST', headers, cache: 'no-store',
+                        body: JSON.stringify({ name: String(functionName), data })
+                    });
+                } catch (_) {
+                    const err = new Error('Servizio di autenticazione non raggiungibile.');
+                    err.code = 'unavailable';
+                    throw err;
+                }
+                let payload = {};
+                try { payload = await response.json(); } catch (_) {}
+                if (!response.ok || payload.error) {
+                    const err = new Error(payload?.error?.message || 'Operazione non completata.');
+                    err.code = payload?.error?.code || (response.status === 401 ? 'unauthenticated' : 'internal');
+                    throw err;
+                }
+                return { data: payload.data };
+            }
         });
         let secureVotingSession = null;
         const SESSION_IDLE_MS = 15 * 60 * 1000;
