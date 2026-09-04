@@ -13,13 +13,14 @@ jobs:
   diagnose:
     runs-on: ubuntu-latest
     steps:
-      - name: Leggi stato health Vercel
+      - name: Leggi stato alias Vercel effettivo
         shell: bash
         run: |
           set +e
-          echo "=== HEALTH ==="
-          curl -sS -i --max-time 20 https://elezioni-primo-levi-vercel.vercel.app/api/health
+          BASE='https://elezioni-primo-levi-vercel-giuseppeborzumati-2630.vercel.app'
+          echo "=== HEALTH ALIAS EFFETTIVO ==="
+          curl -sS -i --max-time 20 "$BASE/api/health"
           echo
-          echo "=== ROOT ==="
-          curl -sS -i --max-time 20 https://elezioni-primo-levi-vercel.vercel.app/ | head -n 30
+          echo "=== ROOT ALIAS EFFETTIVO ==="
+          curl -sS -i --max-time 20 "$BASE/" | head -n 30
           exit 0
