@@ -1,0 +1,25 @@
+name: Diagnosi Vercel puntuale
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/diagnose-vercel-now.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Leggi stato health Vercel
+        shell: bash
+        run: |
+          set +e
+          echo "=== HEALTH ==="
+          curl -sS -i --max-time 20 https://elezioni-primo-levi-vercel.vercel.app/api/health
+          echo
+          echo "=== ROOT ==="
+          curl -sS -i --max-time 20 https://elezioni-primo-levi-vercel.vercel.app/ | head -n 30
+          exit 0
