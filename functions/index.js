@@ -15,11 +15,13 @@
  */
 
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
-const admin = require('firebase-admin');
+const { initializeApp } = require('firebase-admin/app');
+const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
+const { getAuth } = require('firebase-admin/auth');
 const crypto = require('crypto');
 
-admin.initializeApp();
-const db = admin.firestore();
+initializeApp();
+const db = getFirestore();
 const APP_ID = 'iis-levi-electoral-v3';
 const REGION = 'europe-west1';
 
@@ -139,7 +141,7 @@ async function auditAdmin(actor, action, details = {}) {
     actorRole: actor.role,
     action,
     details: clean,
-    at: admin.firestore.FieldValue.serverTimestamp()
+    at: FieldValue.serverTimestamp()
   });
 }
 
@@ -260,7 +262,7 @@ async function authenticateStaff({ username, password, requestedRole, year }) {
     valid = true;
     const salt = crypto.randomBytes(24).toString('hex');
     const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
-    await docSnap.ref.update({ passwordSalt: salt, passwordHash: hash, migratedAt: admin.firestore.FieldValue.serverTimestamp() });
+    await docSnap.ref.update({ passwordSalt: salt, passwordHash: hash, migratedAt: FieldValue.serverTimestamp() });
   }
   if (!valid) throw new HttpsError('permission-denied', 'Credenziali non valide.');
 
@@ -271,9 +273,9 @@ async function authenticateStaff({ username, password, requestedRole, year }) {
   // Backfill automatico per gli account gestionali creati prima dell'introduzione della policy.
   if (expiresAt && !record.expiresAt) {
     await docSnap.ref.update({
-      expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
+      expiresAt: Timestamp.fromDate(expiresAt),
       expiryPolicy: 'FINE_ANNO_SCOLASTICO',
-      expiryPolicyAppliedAt: admin.firestore.FieldValue.serverTimestamp()
+      expiryPolicyAppliedAt: FieldValue.serverTimestamp()
     });
   }
 
@@ -284,7 +286,7 @@ async function authenticateStaff({ username, password, requestedRole, year }) {
     mustChangePassword: record.mustChangePassword === true,
     ...(expiresAt ? { staffExpiresAt: Math.floor(expiresAt.getTime() / 1000) } : {})
   };
-  const customToken = await admin.auth().createCustomToken(`staff-${docSnap.id}-${crypto.randomUUID()}`, claims);
+  const customToken = await getAuth().createCustomToken(`staff-${docSnap.id}-${crypto.randomUUID()}`, claims);
   return {
     customToken,
     profile: {
@@ -503,7 +505,7 @@ exports.validateVoterToken = onCall({ region: REGION, enforceAppCheck: false }, 
     }
     tx.update(tokenRef, {
       activeSessionHash: sessionHash,
-      sessionExpiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 15 * 60 * 1000)
+      sessionExpiresAt: Timestamp.fromMillis(Date.now() + 15 * 60 * 1000)
     });
   });
 
@@ -566,8 +568,8 @@ exports.castVote = onCall({ region: REGION, enforceAppCheck: false }, async (req
     }
 
     const updates = {
-      activeSessionHash: admin.firestore.FieldValue.delete(),
-      sessionExpiresAt: admin.firestore.FieldValue.delete()
+      activeSessionHash: FieldValue.delete(),
+      sessionExpiresAt: FieldValue.delete()
     };
     const writes = [];
     const addBallot = (key, collectionName, flag, extra = {}) => {
@@ -649,7 +651,7 @@ exports.changeCommissionPassword = onCall({ region: REGION }, async (request) =>
       passwordHash,
       mustChangePassword: false,
       bootstrapAccount: false,
-      passwordChangedAt: admin.firestore.FieldValue.serverTimestamp(),
+      passwordChangedAt: FieldValue.serverTimestamp(),
       passwordChangedBy: accountId
     });
   } else {
@@ -662,7 +664,7 @@ exports.changeCommissionPassword = onCall({ region: REGION }, async (request) =>
     staffAccountId: accountId,
     mustChangePassword: false
   };
-  const customToken = await admin.auth().createCustomToken(`staff-${accountId}-${crypto.randomUUID()}`, claims);
+  const customToken = await getAuth().createCustomToken(`staff-${accountId}-${crypto.randomUUID()}`, claims);
   await auditAdmin({ uid: accountId, role: 'COMMISSIONE' }, 'COMMISSION_PASSWORD_CHANGED', { accountId });
   return {
     ok: true,
@@ -697,7 +699,7 @@ exports.referentLogin = onCall({ region: REGION }, async (request) => {
   const map = snap.exists ? (snap.data() || {}) : {};
   const rec = map[token];
   if (!rec || normalize(rec.tipo) !== type) throw new HttpsError('permission-denied', 'Codice referente non valido.');
-  const customToken = await admin.auth().createCustomToken(`referent-${crypto.randomUUID()}`, {
+  const customToken = await getAuth().createCustomToken(`referent-${crypto.randomUUID()}`, {
     role: 'REFERENTE', scopeClass: rec.classe, referentType: rec.tipo
   });
   return { customToken, classe: rec.classe, tipo: rec.tipo };
@@ -762,10 +764,10 @@ exports.createStaffAccount = onCall({ region: REGION }, async (request) => {
     name, username, passwordHash, passwordSalt: salt, role, scopeClass,
     active: true,
     ...(expiresAt ? {
-      expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
+      expiresAt: Timestamp.fromDate(expiresAt),
       expiryPolicy: 'FINE_ANNO_SCOLASTICO'
     } : {}),
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
     createdBy: actor.uid
   });
   await auditAdmin(actor, 'CREATE_STAFF_ACCOUNT', {
@@ -811,7 +813,7 @@ exports.setStaffAccountActive = onCall({ region: REGION }, async (request) => {
   const id = String(request.data?.id || '');
   const active = request.data?.active === true;
   if (!id) throw new HttpsError('invalid-argument', 'Account mancante.');
-  await yearlyCollection('gestione_accessi', year).doc(id).update({ active, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  await yearlyCollection('gestione_accessi', year).doc(id).update({ active, updatedAt: FieldValue.serverTimestamp() });
   await auditAdmin(actor, 'SET_STAFF_ACCOUNT_ACTIVE', { accountId: id, active });
   return { ok: true };
 });
@@ -832,8 +834,8 @@ exports.setRegularityControl = onCall({region:REGION}, async request => {
   const config=await loadElectionConfig(year);
   if(REGULARITY_PRE_VOTE_CONTROLS.includes(control)&&electionPhase(config)!=='BEFORE') throw new HttpsError('failed-precondition','I controlli preliminari non sono modificabili dopo l’apertura della finestra elettorale.');
   const ref=regularityStateRef(year);
-  await db.runTransaction(async tx=>{const snap=await tx.get(ref),cur={...emptyRegularityState(),...(snap.exists?snap.data():{})};tx.set(ref,{[control]:value,notes:{...(cur.notes||{}),[control]:note},updatedAt:admin.firestore.FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});});
-  await regularityEvents(year).add({type:'CONTROL_UPDATE',control,value,note,actorUid:actor.uid,at:admin.firestore.FieldValue.serverTimestamp()});
+  await db.runTransaction(async tx=>{const snap=await tx.get(ref),cur={...emptyRegularityState(),...(snap.exists?snap.data():{})};tx.set(ref,{[control]:value,notes:{...(cur.notes||{}),[control]:note},updatedAt:FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});});
+  await regularityEvents(year).add({type:'CONTROL_UPDATE',control,value,note,actorUid:actor.uid,at:FieldValue.serverTimestamp()});
   await auditAdmin(actor,'REGULARITY_CONTROL_UPDATE',{control,value}); return{ok:true};
 });
 
@@ -842,8 +844,8 @@ exports.recordResultsPublication = onCall({region:REGION}, async request => {
   const protocolRef=String(request.data?.protocolRef||'').trim().slice(0,160), appealDeadline=String(request.data?.appealDeadline||'').trim();
   if(!protocolRef||!/^\d{4}-\d{2}-\d{2}$/.test(appealDeadline)) throw new HttpsError('invalid-argument','Inserire estremi pubblicazione e termine ricorsi AAAA-MM-GG.');
   if(electionPhase(await loadElectionConfig(year))==='OPEN') throw new HttpsError('failed-precondition','Non è possibile pubblicare risultati a urne aperte.');
-  await regularityStateRef(year).set({resultsPublished:true,resultsPublishedAt:admin.firestore.FieldValue.serverTimestamp(),resultsPublicationProtocol:protocolRef,appealDeadline,appealWindowClosed:false,legalHold:true,updatedAt:admin.firestore.FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
-  await regularityEvents(year).add({type:'RESULTS_PUBLICATION',protocolRef,appealDeadline,actorUid:actor.uid,at:admin.firestore.FieldValue.serverTimestamp()});
+  await regularityStateRef(year).set({resultsPublished:true,resultsPublishedAt:FieldValue.serverTimestamp(),resultsPublicationProtocol:protocolRef,appealDeadline,appealWindowClosed:false,legalHold:true,updatedAt:FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
+  await regularityEvents(year).add({type:'RESULTS_PUBLICATION',protocolRef,appealDeadline,actorUid:actor.uid,at:FieldValue.serverTimestamp()});
   await auditAdmin(actor,'RESULTS_PUBLICATION_RECORDED',{protocolRef,appealDeadline}); return{ok:true};
 });
 
@@ -851,8 +853,8 @@ exports.fileElectoralAppeal = onCall({region:REGION}, async request => {
   const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico;
   const protocolRef=String(request.data?.protocolRef||'').trim().slice(0,160),subject=String(request.data?.subject||'').trim().slice(0,1000);
   if(!protocolRef||!subject) throw new HttpsError('invalid-argument','Protocollo e oggetto obbligatori.');
-  const ref=regularityAppeals(year).doc(); await ref.set({protocolRef,subject,status:'OPEN',filedAt:admin.firestore.FieldValue.serverTimestamp(),createdBy:actor.uid});
-  await regularityStateRef(year).set({legalHold:true,appealWindowClosed:false,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
+  const ref=regularityAppeals(year).doc(); await ref.set({protocolRef,subject,status:'OPEN',filedAt:FieldValue.serverTimestamp(),createdBy:actor.uid});
+  await regularityStateRef(year).set({legalHold:true,appealWindowClosed:false,updatedAt:FieldValue.serverTimestamp()},{merge:true});
   await auditAdmin(actor,'ELECTORAL_APPEAL_FILED',{appealId:ref.id,protocolRef}); return{ok:true,id:ref.id};
 });
 
@@ -860,7 +862,7 @@ exports.resolveElectoralAppeal = onCall({region:REGION}, async request => {
   const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico,id=String(request.data?.id||''),decisionRef=String(request.data?.decisionRef||'').trim().slice(0,200);
   if(!id||!decisionRef) throw new HttpsError('invalid-argument','Ricorso e decisione obbligatori.');
   const ref=regularityAppeals(year).doc(id),snap=await ref.get(); if(!snap.exists) throw new HttpsError('not-found','Ricorso non trovato.');
-  await ref.update({status:'RESOLVED',decisionRef,decidedAt:admin.firestore.FieldValue.serverTimestamp(),decidedBy:actor.uid});
+  await ref.update({status:'RESOLVED',decisionRef,decidedAt:FieldValue.serverTimestamp(),decidedBy:actor.uid});
   await auditAdmin(actor,'ELECTORAL_APPEAL_RESOLVED',{appealId:id,decisionRef}); return{ok:true};
 });
 
@@ -868,16 +870,16 @@ exports.recordElectoralIncident = onCall({region:REGION}, async request => {
   const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico;
   const protocolRef=String(request.data?.protocolRef||'').trim().slice(0,160),title=String(request.data?.title||'').trim().slice(0,200),details=String(request.data?.details||'').trim().slice(0,2000),suspend=request.data?.suspend===true;
   if(!title||!details) throw new HttpsError('invalid-argument','Titolo e descrizione obbligatori.');
-  await regularityEvents(year).add({type:'INCIDENT',protocolRef,title,details,suspend,actorUid:actor.uid,at:admin.firestore.FieldValue.serverTimestamp()});
-  await regularityStateRef(year).set({emergencySuspended:suspend,lastIncidentAt:admin.firestore.FieldValue.serverTimestamp(),updatedAt:admin.firestore.FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
+  await regularityEvents(year).add({type:'INCIDENT',protocolRef,title,details,suspend,actorUid:actor.uid,at:FieldValue.serverTimestamp()});
+  await regularityStateRef(year).set({emergencySuspended:suspend,lastIncidentAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
   await auditAdmin(actor,'ELECTORAL_INCIDENT_RECORDED',{protocolRef,title,suspend}); return{ok:true};
 });
 
 exports.setEmergencySuspension = onCall({region:REGION}, async request => {
   const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico,suspended=request.data?.suspended===true,reason=String(request.data?.reason||'').trim().slice(0,1000);
   if(!reason) throw new HttpsError('invalid-argument','Motivazione obbligatoria.');
-  await regularityStateRef(year).set({emergencySuspended:suspended,suspensionReason:reason,updatedAt:admin.firestore.FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
-  await regularityEvents(year).add({type:suspended?'SUSPENSION':'RESUMPTION',reason,actorUid:actor.uid,at:admin.firestore.FieldValue.serverTimestamp()});
+  await regularityStateRef(year).set({emergencySuspended:suspended,suspensionReason:reason,updatedAt:FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
+  await regularityEvents(year).add({type:suspended?'SUSPENSION':'RESUMPTION',reason,actorUid:actor.uid,at:FieldValue.serverTimestamp()});
   await auditAdmin(actor,suspended?'ELECTION_SUSPENDED':'ELECTION_RESUMED',{}); return{ok:true};
 });
 
@@ -888,10 +890,10 @@ exports.closeElectoralProcedure = onCall({region:REGION}, async request => {
   const state=await loadRegularityState(year); if(!state.resultsPublished||!state.appealWindowClosed||!state.finalArchiveSealed) throw new HttpsError('failed-precondition','Completare pubblicazione, ricorsi e sigillo fascicolo.');
   const open=await regularityAppeals(year).where('status','==','OPEN').limit(1).get(); if(!open.empty) throw new HttpsError('failed-precondition','Esistono ricorsi ancora aperti.');
   const accounts=await yearlyCollection('gestione_accessi',year).get(); let count=0,batch=db.batch();
-  for(const d of accounts.docs){if(MANAGEMENT_ROLES.has(normalize(d.data()?.role))){batch.update(d.ref,{active:false,closedProcedureRevocationAt:admin.firestore.FieldValue.serverTimestamp(),closedProcedureRevocationRef:closureRef});count++;if(count%400===0){await batch.commit();batch=db.batch();}}}
+  for(const d of accounts.docs){if(MANAGEMENT_ROLES.has(normalize(d.data()?.role))){batch.update(d.ref,{active:false,closedProcedureRevocationAt:FieldValue.serverTimestamp(),closedProcedureRevocationRef:closureRef});count++;if(count%400===0){await batch.commit();batch=db.batch();}}}
   if(count%400!==0) await batch.commit();
-  await regularityStateRef(year).set({procedureClosed:true,procedureClosedAt:admin.firestore.FieldValue.serverTimestamp(),closureRef,legalHold:false,emergencySuspended:false,updatedAt:admin.firestore.FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
-  await regularityEvents(year).add({type:'PROCEDURE_CLOSED',closureRef,revokedManagementAccounts:count,actorUid:actor.uid,at:admin.firestore.FieldValue.serverTimestamp()});
+  await regularityStateRef(year).set({procedureClosed:true,procedureClosedAt:FieldValue.serverTimestamp(),closureRef,legalHold:false,emergencySuspended:false,updatedAt:FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
+  await regularityEvents(year).add({type:'PROCEDURE_CLOSED',closureRef,revokedManagementAccounts:count,actorUid:actor.uid,at:FieldValue.serverTimestamp()});
   await auditAdmin(actor,'ELECTORAL_PROCEDURE_CLOSED',{closureRef,revokedManagementAccounts:count}); return{ok:true,revokedManagementAccounts:count};
 });
 exports.getSecurityStatus = onCall({ region: REGION }, async (request) => {
