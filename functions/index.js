@@ -1,48 +1,702 @@
 'use strict';
-const {onCall,HttpsError}=require('firebase-functions/v2/https');
-const {setGlobalOptions}=require('firebase-functions/v2');
-const admin=require('firebase-admin');
-const crypto=require('crypto');
+
+/**
+ * ITSCG Primo Levi - Piattaforma elettorale
+ * Backend Firebase Functions (2nd gen)
+ *
+ * Principi di progetto:
+ * - nessun segreto nel browser/repository;
+ * - nessun identificativo dell'elettore nella scheda;
+ * - nessun timestamp nella scheda;
+ * - separazione persistente tra diritto di voto e contenuto del voto;
+ * - autorizzazioni server-side per ruolo;
+ * - risultati parziali non esposti durante la votazione;
+ * - audit solo per operazioni amministrative (mai per il contenuto del voto).
+ */
+
+const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const admin = require('firebase-admin');
+const crypto = require('crypto');
+
 admin.initializeApp();
-const db=admin.firestore();
-const REGION='europe-west1';
-const APP_ID='iis-levi-electoral-v3';
-setGlobalOptions({region:REGION,maxInstances:20});
-const STAFF_ROLES=new Set(['COMMISSIONE','DIRIGENTE','VICEPRESIDE','DSGA','SEGRETERIA']);
-const SESSION_MS=15*60*1000;
-const norm=v=>String(v??'').trim().toUpperCase();
-const suffix=y=>{const s=String(y||'').trim();if(!/^20\d{2}\/20\d{2}$/.test(s))throw new HttpsError('invalid-argument','Anno scolastico non valido.');return s.replace('/','_')};
-const root=()=>db.collection('artifacts').doc(APP_ID).collection('public').doc('data');
-const col=(n,y)=>root().collection(`${n}_${suffix(y)}`);
-const globalConfig=()=>root().collection('config').doc('settings_v3');
-const yearlyConfig=y=>root().collection('config').doc(`yearly_settings_${suffix(y)}`);
-const hash=v=>crypto.createHash('sha256').update(String(v)).digest('hex');
-const randomId=(bytes=32)=>crypto.randomBytes(bytes).toString('base64url');
-function requireAuth(req,roles=[]){if(!req.auth)throw new HttpsError('unauthenticated','Autenticazione richiesta.');const r=norm(req.auth.token.role);if(roles.length&&!roles.includes(r))throw new HttpsError('permission-denied','Ruolo non autorizzato.');return{uid:req.auth.uid,role:r,scopeClass:norm(req.auth.token.scopeClass||'TUTTE'),name:String(req.auth.token.name||'')}}
-async function cfg(year){const s=await yearlyConfig(year).get();if(!s.exists)throw new HttpsError('failed-precondition','Configurazione annuale non disponibile.');return s.data()||{}}
-function parseIT(d,t){if(!/^\d{2}\/\d{2}\/\d{4}$/.test(d||'')||!/^\d{2}:\d{2}$/.test(t||''))return null;const[dd,mm,yy]=d.split('/').map(Number),[hh,mi]=t.split(':').map(Number);return new Date(Date.UTC(yy,mm-1,dd,hh-1,mi,0))}
-async function phase(year){const c=await cfg(year),cal=c.calendario||{},now=Date.now(),start=parseIT(cal.votingStartDate,cal.votingStartTime),end=parseIT(cal.votingEndDate,cal.votingEndTime),rel=parseIT(cal.resultsReleaseDate,cal.resultsReleaseTime);if(start&&now<start.getTime())return{phase:'BEFORE',config:c};if(end&&now>end.getTime())return{phase:rel&&now>=rel.getTime()&&c.commissionFinalized===true?'RELEASED':'CLOSED',config:c};return{phase:'OPEN',config:c}}
-async function audit(actor,action,meta={}){const safe={};for(const[k,v]of Object.entries(meta)){if(!/token|vote|ballot|session|prefer|candidate|lista/i.test(k))safe[k]=v}await root().collection('audit_admin').add({action,role:actor.role,uidHash:hash(actor.uid).slice(0,24),at:admin.firestore.FieldValue.serverTimestamp(),meta:safe})}
-function verifyPwd(pw,data){if(!data.passwordHash||!data.passwordSalt)return false;try{return crypto.timingSafeEqual(Buffer.from(data.passwordHash,'hex'),crypto.scryptSync(pw,data.passwordSalt,64))}catch{return false}}
-async function findStaff(username,year,role){const snap=await col('gestione_accessi',year).where('username','==',String(username||'').trim().toLowerCase()).where('role','==',role).limit(1).get();if(snap.empty)return null;const d=snap.docs[0];return{id:d.id,...d.data()}}
-function tokenClaims(profile){return{role:norm(profile.role),scopeClass:norm(profile.scopeClass||'TUTTE'),name:String(profile.name||'')}}
-async function staffCustomToken(profile){return admin.auth().createCustomToken(`staff_${profile.id}`,tokenClaims(profile))}
-function activeFor(c,type){return type==='STUDENTE'?['istituto','consulta','classeStudente']:type==='GENITORE'?['consiglio','classeGenitore']:['consiglio']}
-function flags(d){return{voted_consiglio:!!d.voted_consiglio,voted_istituto:!!d.voted_istituto,voted_consulta:!!d.voted_consulta,voted_classe_studente:!!d.voted_classe_studente,voted_classe_genitore:!!d.voted_classe_genitore}}
-function storedBallot(v,kind,tokenData){const o={};if(kind==='consiglio'||kind==='istituto'||kind==='consulta'){o.lista=String(v.lista||'').trim();const ps=[v.p1,v.p2].map(x=>norm(x)).filter(Boolean);if(ps.length)o.preferenze=ps}else if(kind==='classeStudente'||kind==='classeGenitore'){o.isBianca=!!v.isBianca;if(!o.isBianca){o.candidate1=norm(v.candidate1);if(v.candidate2)o.candidate2=norm(v.candidate2)}o.classe=norm(tokenData.classe)}o.tipo=norm(tokenData.tipo);return o}
-function ballotMeta(kind){return{consiglio:['voti_consiglio','voted_consiglio'],istituto:['voti_istituto','voted_istituto'],consulta:['voti_consulta','voted_consulta'],classeStudente:['voti_classe_studenti','voted_classe_studente'],classeGenitore:['voti_classe_genitori','voted_classe_genitore']}[kind]}
-function validateBallot(kind,v,c,td){const m=ballotMeta(kind);if(!m)throw new HttpsError('invalid-argument','Scheda non prevista.');const type=norm(td.tipo);if(!activeFor(c,type).includes(kind))throw new HttpsError('permission-denied','Scheda non spettante.');if(kind==='consiglio'||kind==='istituto'||kind==='consulta'){const lists=kind==='consiglio'?(c.listeConsiglio?.[type]||{}):kind==='istituto'?(c.listeIstituto||{}):(c.listeConsulta||{});if(!v.lista||!lists[v.lista])throw new HttpsError('invalid-argument','Lista non valida.');const prefs=[v.p1,v.p2].map(norm).filter(Boolean);if(new Set(prefs).size!==prefs.length)throw new HttpsError('invalid-argument','Preferenze duplicate.');const max=Number(kind==='consiglio'?c.maxPrefConsiglio:kind==='istituto'?c.maxPrefIstituto:c.maxPrefConsulta)||0;if(prefs.length>max)throw new HttpsError('invalid-argument','Troppe preferenze.');const allowed=(lists[v.lista].candidati||[]).map(norm);for(const p of prefs)if(!allowed.includes(p))throw new HttpsError('invalid-argument','Candidato non appartenente alla lista.')}else if(!v.isBianca&&!norm(v.candidate1))throw new HttpsError('invalid-argument','Indicare un candidato o scheda bianca.')}
-exports.validateVoterToken=onCall(async req=>{const token=norm(req.data?.token),year=req.data?.annoScolastico;if(!token||token.length>100)throw new HttpsError('invalid-argument','Token non valido.');const ph=await phase(year);if(ph.phase!=='OPEN')throw new HttpsError('failed-precondition','Votazione non aperta.');const ref=col('tokens',year).doc(token),snap=await ref.get();if(!snap.exists)throw new HttpsError('permission-denied','Credenziale non valida.');const d=snap.data()||{},f=flags(d),eligible=activeFor(ph.config,norm(d.tipo));const map={consiglio:'voted_consiglio',istituto:'voted_istituto',consulta:'voted_consulta',classeStudente:'voted_classe_studente',classeGenitore:'voted_classe_genitore'};if(eligible.every(k=>f[map[k]]))throw new HttpsError('failed-precondition','Tutte le schede risultano già concluse.');if(d.activeSessionHash&&d.sessionExpiresAt?.toMillis?.()>Date.now())throw new HttpsError('aborted','Esiste già una sessione attiva per questa credenziale.');const sid=randomId(),sh=hash(sid),exp=admin.firestore.Timestamp.fromMillis(Date.now()+SESSION_MS);await ref.update({activeSessionHash:sh,sessionExpiresAt:exp});return{sessionId:sid,tipo:norm(d.tipo),classe:norm(d.classe),indirizzo:norm(d.indirizzo),...f}});
-exports.castVote=onCall(async req=>{const sid=String(req.data?.sessionId||''),year=req.data?.annoScolastico,ballots=req.data?.ballots;if(!sid||!ballots||typeof ballots!=='object')throw new HttpsError('invalid-argument','Sessione o schede mancanti.');const ph=await phase(year);if(ph.phase!=='OPEN')throw new HttpsError('failed-precondition','Votazione chiusa.');const sh=hash(sid),qs=await col('tokens',year).where('activeSessionHash','==',sh).limit(1).get();if(qs.empty)throw new HttpsError('permission-denied','Sessione non valida.');const tokenDoc=qs.docs[0],td=tokenDoc.data()||{};if(!td.sessionExpiresAt||td.sessionExpiresAt.toMillis()<Date.now())throw new HttpsError('deadline-exceeded','Sessione scaduta.');const entries=Object.entries(ballots);if(!entries.length)throw new HttpsError('invalid-argument','Nessuna scheda.');for(const[k,v]of entries)validateBallot(k,v,ph.config,td);await db.runTransaction(async tx=>{const fresh=(await tx.get(tokenDoc.ref)).data()||{};if(fresh.activeSessionHash!==sh)throw new HttpsError('aborted','Sessione già consumata.');for(const[k,v]of entries){const[cn,flag]=ballotMeta(k);if(fresh[flag])throw new HttpsError('already-exists','Scheda già votata.');const b=storedBallot(v,k,fresh);const ref=col(cn,year).doc(randomId(24));tx.create(ref,b);tx.update(tokenDoc.ref,{[flag]:true})}tx.update(tokenDoc.ref,{activeSessionHash:admin.firestore.FieldValue.delete(),sessionExpiresAt:admin.firestore.FieldValue.delete()})});return{ok:true}});
-exports.commissionLogin=onCall(async req=>{const year=req.data?.annoScolastico,p=await findStaff(req.data?.username,year,'COMMISSIONE');if(!p||p.active===false||!verifyPwd(String(req.data?.password||''),p))throw new HttpsError('permission-denied','Credenziali non valide.');const ct=await staffCustomToken(p);return{customToken:ct,profile:{name:p.name,role:'COMMISSIONE',scopeClass:p.scopeClass||'TUTTE'}}});
-exports.managementLogin=onCall(async req=>{const role=norm(req.data?.requestedRole);if(!STAFF_ROLES.has(role)||role==='COMMISSIONE')throw new HttpsError('invalid-argument','Ruolo non valido.');const p=await findStaff(req.data?.username,req.data?.annoScolastico,role);if(!p||p.active===false||!verifyPwd(String(req.data?.password||''),p))throw new HttpsError('permission-denied','Credenziali non valide.');return{customToken:await staffCustomToken(p),profile:{name:p.name,role,scopeClass:p.scopeClass||'TUTTE'}}});
-exports.referentLogin=onCall(async req=>{const year=req.data?.annoScolastico,tipo=norm(req.data?.tipo),token=norm(req.data?.token);if(!['STUDENTE','GENITORE'].includes(tipo)||!token)throw new HttpsError('invalid-argument','Dati non validi.');const d=(await col('config',year).doc('referenti_keys').get()).data()||{},entry=d[token];if(!entry||norm(entry.tipo)!==tipo)throw new HttpsError('permission-denied','Codice referente non valido.');const uid=`ref_${hash(year+'|'+token).slice(0,32)}`;return{customToken:await admin.auth().createCustomToken(uid,{role:'REFERENTE',tipo,scopeClass:norm(entry.classe)}),tipo,classe:norm(entry.classe)}});
-async function aggregate(year,scopeClass='TUTTE'){const names=['voti_consiglio','voti_istituto','voti_consulta','voti_classe_studenti','voti_classe_genitori'],out={totals:{}};for(const n of names){const s=await col(n,year).get(),arr=[];s.forEach(d=>{const x=d.data();if(scopeClass==='TUTTE'||norm(x.classe)===scopeClass)arr.push(x)});out.totals[n]=arr.length}return out}
-exports.getAnonymousBallots=onCall(async req=>{const actor=requireAuth(req,['COMMISSIONE','DIRIGENTE','VICEPRESIDE','DSGA','SEGRETERIA','REFERENTE']),year=req.data?.annoScolastico,ph=await phase(year);if(actor.role==='COMMISSIONE'&&ph.phase!=='OPEN'){const name=String(req.data?.collection||'');if(!['voti_consiglio','voti_istituto','voti_consulta','voti_classe_studenti','voti_classe_genitori'].includes(name))return aggregate(year);const s=await col(name,year).get(),items=[];s.forEach(d=>items.push(d.data()));return{anonymousBallots:items,phase:ph.phase}}return{...(await aggregate(year,actor.scopeClass||'TUTTE')),phase:ph.phase,detailReleased:ph.phase==='RELEASED'}});
-exports.getSecurityStatus=onCall(async req=>{const a=requireAuth(req,['COMMISSIONE','DIRIGENTE','VICEPRESIDE','DSGA','SEGRETERIA']);const ph=await phase(req.data?.annoScolastico);await audit(a,'SECURITY_STATUS',{annoScolastico:req.data?.annoScolastico});return{phase:ph.phase,controls:{ballotClientAccess:'DENY',identityBallotLink:'NOT_STORED',ballotTimestamp:'NOT_STORED',serverValidation:true,sessionTtlMinutes:15,auditAdmin:true}}});
-function safeConfig(v,depth=0){if(depth>12)throw new HttpsError('invalid-argument','Configurazione troppo annidata.');if(v==null||typeof v==='boolean'||typeof v==='number')return;if(typeof v==='string'){if(v.length>8000||/[<>`]/.test(v))throw new HttpsError('invalid-argument','Valore configurazione non ammesso.');return}if(Array.isArray(v)){if(v.length>1000)throw new HttpsError('invalid-argument','Troppi elementi.');return v.forEach(x=>safeConfig(x,depth+1))}if(typeof v==='object')return Object.entries(v).forEach(([k,x])=>{if(['__proto__','prototype','constructor'].includes(k))throw new HttpsError('invalid-argument','Chiave non ammessa.');safeConfig(x,depth+1)});throw new HttpsError('invalid-argument','Tipo non ammesso.')}
-exports.saveElectionConfig=onCall(async req=>{const a=requireAuth(req,['COMMISSIONE']),c=req.data?.config,y=c?.annoScolastico||req.data?.annoScolastico;safeConfig(c);if(JSON.stringify(c).length>700000)throw new HttpsError('invalid-argument','Configurazione troppo grande.');await db.runTransaction(async tx=>{tx.set(globalConfig(),{annoScolastico:y},{merge:true});tx.set(yearlyConfig(y),{...c,annoScolastico:y})});await audit(a,'SAVE_CONFIG',{annoScolastico:y});return{ok:true}});
-exports.createStaffAccount=onCall(async req=>{const a=requireAuth(req,['COMMISSIONE']),year=req.data?.annoScolastico,role=norm(req.data?.role),username=String(req.data?.username||'').trim().toLowerCase(),name=String(req.data?.name||'').trim(),pw=String(req.data?.password||''),scopeClass=norm(req.data?.scopeClass||'TUTTE');if(!STAFF_ROLES.has(role)||!name||!/^[a-z0-9._-]{3,64}$/.test(username)||pw.length<12)throw new HttpsError('invalid-argument','Dati account non validi.');if(!(await col('gestione_accessi',year).where('username','==',username).limit(1).get()).empty)throw new HttpsError('already-exists','Username esistente.');const salt=crypto.randomBytes(24).toString('hex'),passwordHash=crypto.scryptSync(pw,salt,64).toString('hex');await col('gestione_accessi',year).add({name,username,passwordHash,passwordSalt:salt,role,scopeClass,active:true,createdAt:admin.firestore.FieldValue.serverTimestamp()});await audit(a,'CREATE_STAFF',{role,scopeClass,annoScolastico:year});return{ok:true}});
-exports.setStaffAccountActive=onCall(async req=>{const a=requireAuth(req,['COMMISSIONE']),year=req.data?.annoScolastico,id=String(req.data?.id||'');if(!id)throw new HttpsError('invalid-argument','ID mancante.');await col('gestione_accessi',year).doc(id).update({active:!!req.data?.active});await audit(a,'SET_STAFF_ACTIVE',{annoScolastico:year});return{ok:true}});
-exports.ensureReferentKeys=onCall(async req=>{const a=requireAuth(req,['COMMISSIONE']),year=req.data?.annoScolastico,tipo=norm(req.data?.tipo),classes=[...new Set((req.data?.classes||[]).map(norm).filter(Boolean))];if(!['STUDENTE','GENITORE'].includes(tipo)||!classes.length)throw new HttpsError('invalid-argument','Dati non validi.');const ref=col('config',year).doc('referenti_keys'),out={};await db.runTransaction(async tx=>{const s=await tx.get(ref),d=s.exists?s.data():{};for(const cl of classes){let found=Object.entries(d).find(([,v])=>norm(v.classe)===cl&&norm(v.tipo)===tipo);if(!found){const k=`REF-${tipo==='STUDENTE'?'STU':'GEN'}-${randomId(12).replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,16)}`;d[k]={classe:cl,tipo};found=[k,d[k]]}out[found[0]]=found[1]}tx.set(ref,d)});await audit(a,'ENSURE_REFERENTS',{tipo,classCount:classes.length,annoScolastico:year});return{keys:out}});
-exports.destructiveAction=onCall(async req=>{requireAuth(req,['COMMISSIONE']);throw new HttpsError('failed-precondition','Operazione distruttiva disabilitata. Usare procedura straordinaria verbalizzata e strumenti amministrativi separati.')});
+const db = admin.firestore();
+const APP_ID = 'iis-levi-electoral-v3';
+const REGION = 'europe-west1';
+
+const ALLOWED_STAFF_ROLES = new Set([
+  'COMMISSIONE', 'DIRIGENTE', 'VICEPRESIDE', 'DSGA', 'SEGRETERIA'
+]);
+const MANAGEMENT_ROLES = new Set(['DIRIGENTE', 'VICEPRESIDE', 'DSGA', 'SEGRETERIA']);
+const BALLOT_COLLECTIONS = new Set([
+  'voti_consiglio', 'voti_istituto', 'voti_consulta',
+  'voti_classe_studenti', 'voti_classe_genitori'
+]);
+
+const yearSuffix = (year) => String(year || '2026/2027').replace('/', '_');
+const dataRoot = () => db.collection('artifacts').doc(APP_ID).collection('public').doc('data');
+const yearlyCollection = (name, year) => dataRoot().collection(`${name}_${yearSuffix(year)}`);
+const yearlyConfigRef = (year) => dataRoot().collection('config').doc(`yearly_settings_${yearSuffix(year)}`);
+const globalConfigRef = () => dataRoot().collection('config').doc('settings_v3');
+const sha256 = (value) => crypto.createHash('sha256').update(String(value)).digest('hex');
+const normalize = (value) => String(value || '').trim().toUpperCase().replace(/\s+/g, ' ');
+const canonicalName = (value) => normalize(value).split(' ').filter(Boolean).sort().join(' ');
+
+function safeEqualHex(a, b) {
+  const aa = Buffer.from(String(a || ''), 'hex');
+  const bb = Buffer.from(String(b || ''), 'hex');
+  return aa.length === bb.length && aa.length > 0 && crypto.timingSafeEqual(aa, bb);
+}
+
+function requireAuth(request, allowedRoles = []) {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'Autenticazione richiesta.');
+  const role = String(request.auth.token.role || '').toUpperCase();
+  if (allowedRoles.length && !allowedRoles.includes(role)) {
+    throw new HttpsError('permission-denied', 'Ruolo non autorizzato.');
+  }
+  return { uid: request.auth.uid, role, claims: request.auth.token };
+}
+
+async function loadElectionConfig(year) {
+  const snap = await yearlyConfigRef(year).get();
+  if (!snap.exists) throw new HttpsError('failed-precondition', 'Configurazione elettorale annuale non disponibile.');
+  return snap.data() || {};
+}
+
+function timeZoneOffsetMs(utcMillis, timeZone = 'Europe/Rome') {
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(new Date(utcMillis))
+    .filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]));
+  const representedAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return representedAsUtc - utcMillis;
+}
+
+function parseItalianDate(dateText, timeText) {
+  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(String(dateText || ''))) return null;
+  if (!/^\d{2}:\d{2}$/.test(String(timeText || ''))) return null;
+  const [dd, mm, yyyy] = dateText.split('/').map(Number);
+  const [hh, min] = timeText.split(':').map(Number);
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31 || hh > 23 || min > 59) return null;
+  const localAsUtc = Date.UTC(yyyy, mm - 1, dd, hh, min, 0);
+  let guess = localAsUtc;
+  // Due iterazioni risolvono correttamente anche il passaggio CET/CEST.
+  for (let i = 0; i < 3; i++) guess = localAsUtc - timeZoneOffsetMs(guess, 'Europe/Rome');
+  return new Date(guess);
+}
+
+function electionPhase(config) {
+  const cal = config.calendario || {};
+  const start = parseItalianDate(cal.votingStartDate, cal.votingStartTime);
+  const end = parseItalianDate(cal.votingEndDate, cal.votingEndTime);
+  const release = parseItalianDate(cal.resultsReleaseDate, cal.resultsReleaseTime);
+  const now = Date.now();
+  if (start && now < start.getTime()) return 'BEFORE';
+  if (end && now <= end.getTime()) return 'OPEN';
+  if (config.commissionFinalized === true && release && now >= release.getTime()) return 'RELEASED';
+  return 'CLOSED';
+}
+
+function assertVotingOpen(config) {
+  const phase = electionPhase(config);
+  if (phase !== 'OPEN') {
+    if (phase === 'BEFORE') throw new HttpsError('failed-precondition', 'Le votazioni non sono ancora aperte.');
+    throw new HttpsError('failed-precondition', 'Le votazioni sono chiuse.');
+  }
+}
+
+async function auditAdmin(actor, action, details = {}) {
+  // Mai registrare token di voto, preferenze, sessionId o altri elementi
+  // che possano correlare un elettore a una scheda.
+  const forbidden = ['token', 'sessionId', 'ballot', 'ballots', 'preferenze', 'password'];
+  const clean = {};
+  for (const [key, value] of Object.entries(details || {})) {
+    if (!forbidden.includes(key)) clean[key] = value;
+  }
+  await dataRoot().collection('audit_admin').add({
+    actorUid: actor.uid,
+    actorRole: actor.role,
+    action,
+    details: clean,
+    at: admin.firestore.FieldValue.serverTimestamp()
+  });
+}
+
+
+function assertSafeConfigValue(value, path = 'config', depth = 0) {
+  if (depth > 12) throw new HttpsError('invalid-argument', 'Configurazione troppo annidata.');
+  if (value == null || typeof value === 'boolean' || typeof value === 'number') return;
+  if (typeof value === 'string') {
+    if (value.length > 8000) throw new HttpsError('invalid-argument', `Valore troppo lungo: ${path}.`);
+    if (/[<>`"]/.test(value) || /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(value)) {
+      throw new HttpsError('invalid-argument', `Caratteri non ammessi nella configurazione: ${path}.`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 1000) throw new HttpsError('invalid-argument', `Troppi elementi: ${path}.`);
+    value.forEach((v, i) => assertSafeConfigValue(v, `${path}[${i}]`, depth + 1));
+    return;
+  }
+  if (typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      if (['__proto__', 'prototype', 'constructor'].includes(k)) throw new HttpsError('invalid-argument', 'Chiave di configurazione non ammessa.');
+      assertSafeConfigValue(v, `${path}.${k}`, depth + 1);
+    }
+    return;
+  }
+  throw new HttpsError('invalid-argument', `Tipo non ammesso: ${path}.`);
+}
+function verifyScryptPassword(password, record) {
+  if (!record || !record.passwordHash || !record.passwordSalt) return false;
+  const derived = crypto.scryptSync(String(password), String(record.passwordSalt), 64).toString('hex');
+  return safeEqualHex(derived, record.passwordHash);
+}
+
+function legacyPasswordMatches(password, record) {
+  // Solo per migrazione di eventuali account creati dalla vecchia versione.
+  // Un accesso valido viene immediatamente aggiornato a scrypt+salt.
+  return !!record?.passwordHash && !record?.passwordSalt && safeEqualHex(sha256(password), record.passwordHash);
+}
+
+async function authenticateStaff({ username, password, requestedRole, year }) {
+  const role = normalize(requestedRole);
+  const uname = String(username || '').trim().toLowerCase();
+  if (!ALLOWED_STAFF_ROLES.has(role) || !uname || !password) {
+    throw new HttpsError('invalid-argument', 'Credenziali incomplete.');
+  }
+  const snap = await yearlyCollection('gestione_accessi', year)
+    .where('username', '==', uname)
+    .where('role', '==', role)
+    .limit(1)
+    .get();
+  if (snap.empty) throw new HttpsError('permission-denied', 'Credenziali non valide.');
+  const docSnap = snap.docs[0];
+  const record = docSnap.data() || {};
+  if (record.active === false) throw new HttpsError('permission-denied', 'Account disattivato.');
+
+  let valid = verifyScryptPassword(password, record);
+  if (!valid && legacyPasswordMatches(password, record)) {
+    valid = true;
+    const salt = crypto.randomBytes(24).toString('hex');
+    const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+    await docSnap.ref.update({ passwordSalt: salt, passwordHash: hash, migratedAt: admin.firestore.FieldValue.serverTimestamp() });
+  }
+  if (!valid) throw new HttpsError('permission-denied', 'Credenziali non valide.');
+
+  const claims = {
+    role,
+    scopeClass: record.scopeClass || 'TUTTE',
+    staffAccountId: docSnap.id
+  };
+  const customToken = await admin.auth().createCustomToken(`staff-${docSnap.id}-${crypto.randomUUID()}`, claims);
+  return {
+    customToken,
+    profile: {
+      id: docSnap.id,
+      name: record.name || uname,
+      username: uname,
+      role,
+      scopeClass: record.scopeClass || 'TUTTE'
+    }
+  };
+}
+
+function getListConfig(config, component, voterType) {
+  if (component === 'consiglio') return (config.listeConsiglio || {})[voterType] || {};
+  if (component === 'istituto') return config.listeIstituto || {};
+  if (component === 'consulta') return config.listeConsulta || {};
+  return {};
+}
+
+function validateListBallot(ballot, config, component, voterType) {
+  if (!ballot || typeof ballot !== 'object') return null;
+  const lists = getListConfig(config, component, voterType);
+  const listKey = String(ballot.lista || '');
+  if (!listKey || !Object.prototype.hasOwnProperty.call(lists, listKey)) {
+    throw new HttpsError('invalid-argument', `Lista non valida per ${component}.`);
+  }
+  const maxMap = {
+    consiglio: Number(config.maxPrefConsiglio || 0),
+    istituto: Number(config.maxPrefIstituto || 0),
+    consulta: Number(config.maxPrefConsulta || 0)
+  };
+  const max = Math.max(0, Math.min(10, maxMap[component] || 0));
+  const allowedCandidates = new Set((lists[listKey].candidati || []).map(canonicalName));
+  const prefs = [];
+  for (let i = 1; i <= max; i++) {
+    const value = normalize(ballot[`p${i}`]);
+    if (!value) continue;
+    if (!allowedCandidates.has(canonicalName(value))) {
+      throw new HttpsError('invalid-argument', `Preferenza non valida per ${component}.`);
+    }
+    if (prefs.some((x) => canonicalName(x) === canonicalName(value))) {
+      throw new HttpsError('invalid-argument', 'Preferenze duplicate non ammesse.');
+    }
+    prefs.push(value);
+  }
+  const clean = { lista: listKey };
+  prefs.forEach((p, idx) => { clean[`p${idx + 1}`] = p; });
+  return clean;
+}
+
+async function validateClassBallot(ballot, config, voterType, voterClass, year) {
+  if (!ballot || typeof ballot !== 'object') return null;
+  const isStudent = voterType === 'STUDENTE';
+  const max = Math.max(1, Math.min(4, Number(isStudent ? config.maxPrefClasseStudenti : config.maxPrefClasseGenitori) || 1));
+  const values = [];
+  for (let i = 1; i <= max; i++) {
+    const value = normalize(ballot[`candidate${i}`]);
+    if (value) values.push(value);
+  }
+  if (!values.length) return { isBianca: true };
+  if (new Set(values.map(canonicalName)).size !== values.length) {
+    throw new HttpsError('invalid-argument', 'Candidati duplicati non ammessi.');
+  }
+
+  // Controllo server-side: il nominativo deve appartenere alla stessa componente/classe
+  // degli aventi diritto caricati nel registro elettorale.
+  const candidatesSnap = await yearlyCollection('tokens', year)
+    .where('tipo', '==', voterType)
+    .where('classe', '==', voterClass)
+    .get();
+  const eligible = new Set();
+  candidatesSnap.forEach((d) => {
+    const name = d.data()?.nome;
+    if (name && normalize(name) !== 'ELETTORE ANONIMO') eligible.add(canonicalName(name));
+  });
+  if (eligible.size) {
+    for (const value of values) {
+      if (!eligible.has(canonicalName(value))) {
+        throw new HttpsError('invalid-argument', 'Il candidato indicato non risulta tra gli aventi diritto della classe.');
+      }
+    }
+  }
+  const clean = { isBianca: false };
+  values.forEach((value, idx) => { clean[`candidate${idx + 1}`] = value; });
+  return clean;
+}
+
+function sanitizeStoredBallot(raw) {
+  const forbidden = new Set([
+    'token', 'tokenHash', 'tokenDocId', 'sessionId', 'sessionHash', 'nome', 'email',
+    'uid', 'userId', 'createdAt', 'updatedAt', 'timestamp', 'dataVoto', 'ip', 'userAgent',
+    'ballotId', 'documentId'
+  ]);
+  const out = {};
+  for (const [key, value] of Object.entries(raw || {})) {
+    if (!forbidden.has(key)) out[key] = value;
+  }
+  return out;
+}
+
+function makeTurnoutProjection(rows) {
+  return rows.map((row) => ({
+    ...(row.classe ? { classe: row.classe } : {}),
+    ...(row.tipo ? { tipo: row.tipo } : {}),
+    isBianca: false,
+    _aggregateOnly: true,
+    _turnoutOnly: true
+  }));
+}
+
+function distributePreferences(targetRows, preferenceCounts, prefix, maxSlots) {
+  if (!targetRows.length) return;
+  const pool = [];
+  for (const [name, count] of Object.entries(preferenceCounts)) {
+    for (let i = 0; i < count; i++) pool.push(name);
+  }
+  let cursor = 0;
+  for (const pref of pool) {
+    let attempts = 0;
+    while (attempts < targetRows.length * maxSlots) {
+      const row = targetRows[cursor % targetRows.length];
+      cursor++;
+      attempts++;
+      let placed = false;
+      for (let slot = 1; slot <= maxSlots; slot++) {
+        if (!row[`${prefix}${slot}`]) {
+          row[`${prefix}${slot}`] = pref;
+          placed = true;
+          break;
+        }
+      }
+      if (placed) break;
+    }
+  }
+}
+
+function makeAggregateProjection(rows, collectionName) {
+  // Ricrea esclusivamente le distribuzioni aggregate necessarie all'interfaccia.
+  // Le combinazioni originarie delle singole schede vengono intenzionalmente distrutte.
+  const isClass = collectionName === 'voti_classe_studenti' || collectionName === 'voti_classe_genitori';
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = isClass ? String(row.classe || 'GEN') : (collectionName === 'voti_consiglio' ? String(row.tipo || 'GEN') : 'ALL');
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(row);
+  }
+  const output = [];
+  for (const [groupKey, groupRows] of grouped.entries()) {
+    const common = isClass ? { classe: groupKey } : (collectionName === 'voti_consiglio' ? { tipo: groupKey } : {});
+    const blanks = groupRows.filter((r) => r.isBianca === true).length;
+    for (let i = 0; i < blanks; i++) output.push({ ...common, isBianca: true, _aggregateOnly: true });
+    const validRows = groupRows.filter((r) => r.isBianca !== true);
+
+    if (isClass) {
+      const synthetic = validRows.map(() => ({ ...common, isBianca: false, _aggregateOnly: true }));
+      const counts = {};
+      for (const r of validRows) {
+        for (let i = 1; i <= 4; i++) {
+          const c = normalize(r[`candidate${i}`]);
+          if (c) counts[c] = (counts[c] || 0) + 1;
+        }
+      }
+      distributePreferences(synthetic, counts, 'candidate', 4);
+      output.push(...synthetic);
+      continue;
+    }
+
+    const listCounts = {};
+    const prefByList = {};
+    let noListCount = 0;
+    for (const r of validRows) {
+      const list = r.lista ? String(r.lista) : '';
+      if (list) {
+        listCounts[list] = (listCounts[list] || 0) + 1;
+        if (!prefByList[list]) prefByList[list] = {};
+        for (let i = 1; i <= 10; i++) {
+          const p = normalize(r[`p${i}`]);
+          if (p) prefByList[list][p] = (prefByList[list][p] || 0) + 1;
+        }
+      } else {
+        noListCount++;
+      }
+    }
+    for (const [list, count] of Object.entries(listCounts)) {
+      const synthetic = Array.from({ length: count }, () => ({ ...common, lista: list, isBianca: false, _aggregateOnly: true }));
+      distributePreferences(synthetic, prefByList[list] || {}, 'p', 10);
+      output.push(...synthetic);
+    }
+    for (let i = 0; i < noListCount; i++) output.push({ ...common, isBianca: false, _aggregateOnly: true });
+  }
+  return output;
+}
+
+exports.validateVoterToken = onCall({ region: REGION, enforceAppCheck: false }, async (request) => {
+  const token = normalize(request.data?.token);
+  const year = request.data?.annoScolastico;
+  if (!token || token.length > 80) throw new HttpsError('invalid-argument', 'Token non valido.');
+  const config = await loadElectionConfig(year);
+  assertVotingOpen(config);
+
+  const tokenRef = yearlyCollection('tokens', year).doc(token);
+  const sessionId = crypto.randomBytes(32).toString('base64url');
+  const sessionHash = sha256(sessionId);
+  let voterData;
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(tokenRef);
+    if (!snap.exists) throw new HttpsError('not-found', 'Token non valido.');
+    voterData = snap.data() || {};
+    const expires = voterData.sessionExpiresAt?.toMillis?.() || 0;
+    if (voterData.activeSessionHash && expires > Date.now()) {
+      throw new HttpsError('already-exists', 'Esiste già una sessione di voto attiva per questa credenziale. Attendere la scadenza o completare la sessione aperta.');
+    }
+    tx.update(tokenRef, {
+      activeSessionHash: sessionHash,
+      sessionExpiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 15 * 60 * 1000)
+    });
+  });
+
+  return {
+    sessionId,
+    tipo: voterData.tipo,
+    classe: voterData.classe || null,
+    indirizzo: voterData.indirizzo || null,
+    voted_consiglio: !!voterData.voted_consiglio,
+    voted_istituto: !!voterData.voted_istituto,
+    voted_consulta: !!voterData.voted_consulta,
+    voted_classe_studente: !!voterData.voted_classe_studente,
+    voted_classe_genitore: !!voterData.voted_classe_genitore
+  };
+});
+
+exports.castVote = onCall({ region: REGION, enforceAppCheck: false }, async (request) => {
+  const sessionId = String(request.data?.sessionId || '');
+  const year = request.data?.annoScolastico;
+  const submitted = request.data?.ballots || {};
+  if (!sessionId || sessionId.length > 200) throw new HttpsError('unauthenticated', 'Sessione di voto non valida.');
+  const config = await loadElectionConfig(year);
+  assertVotingOpen(config);
+  const sessionHash = sha256(sessionId);
+
+  const q = await yearlyCollection('tokens', year).where('activeSessionHash', '==', sessionHash).limit(1).get();
+  if (q.empty) throw new HttpsError('unauthenticated', 'Sessione di voto non valida o già utilizzata.');
+  const tokenRef = q.docs[0].ref;
+  const tokenSnapshot = q.docs[0];
+  const tokenDataBefore = tokenSnapshot.data() || {};
+
+  // Validazione contenuti fuori dalla transazione per le query dei candidati di classe.
+  const cleanBallots = {};
+  const voterType = normalize(tokenDataBefore.tipo);
+  const voterClass = normalize(tokenDataBefore.classe);
+
+  if (submitted.consiglio && config.consiglioAttivo && voterType !== 'STUDENTE') {
+    cleanBallots.consiglio = validateListBallot(submitted.consiglio, config, 'consiglio', voterType);
+  }
+  if (submitted.istituto && config.rappresentantiIstitutoAttivo && voterType === 'STUDENTE') {
+    cleanBallots.istituto = validateListBallot(submitted.istituto, config, 'istituto', voterType);
+  }
+  if (submitted.consulta && config.consultaAttiva && voterType === 'STUDENTE') {
+    cleanBallots.consulta = validateListBallot(submitted.consulta, config, 'consulta', voterType);
+  }
+  if (submitted.classeStudente && config.rappresentantiClasseStudentiAttivo && voterType === 'STUDENTE') {
+    cleanBallots.classeStudente = await validateClassBallot(submitted.classeStudente, config, 'STUDENTE', voterClass, year);
+  }
+  if (submitted.classeGenitore && config.rappresentantiClasseGenitoriAttivo && voterType === 'GENITORE') {
+    cleanBallots.classeGenitore = await validateClassBallot(submitted.classeGenitore, config, 'GENITORE', voterClass, year);
+  }
+
+  const result = await db.runTransaction(async (tx) => {
+    const tokenSnap = await tx.get(tokenRef);
+    if (!tokenSnap.exists) throw new HttpsError('not-found', 'Credenziale non disponibile.');
+    const t = tokenSnap.data() || {};
+    if (t.activeSessionHash !== sessionHash || !t.sessionExpiresAt || t.sessionExpiresAt.toMillis() < Date.now()) {
+      throw new HttpsError('deadline-exceeded', 'Sessione scaduta o non valida.');
+    }
+
+    const updates = {
+      activeSessionHash: admin.firestore.FieldValue.delete(),
+      sessionExpiresAt: admin.firestore.FieldValue.delete()
+    };
+    const writes = [];
+    const addBallot = (key, collectionName, flag, extra = {}) => {
+      const ballot = cleanBallots[key];
+      if (!ballot || t[flag]) return;
+      const ref = yearlyCollection(collectionName, year).doc(crypto.randomUUID());
+      const clean = sanitizeStoredBallot({ ...ballot, ...extra });
+      writes.push([ref, clean]);
+      updates[flag] = true;
+    };
+
+    addBallot('consiglio', 'voti_consiglio', 'voted_consiglio', { tipo: voterType });
+    addBallot('istituto', 'voti_istituto', 'voted_istituto', { tipo: 'STUDENTE' });
+    addBallot('consulta', 'voti_consulta', 'voted_consulta', { tipo: 'STUDENTE' });
+    addBallot('classeStudente', 'voti_classe_studenti', 'voted_classe_studente', { classe: voterClass, tipo: 'STUDENTE' });
+    addBallot('classeGenitore', 'voti_classe_genitori', 'voted_classe_genitore', { classe: voterClass, tipo: 'GENITORE' });
+
+    if (!writes.length) throw new HttpsError('failed-precondition', 'Nessuna nuova scheda valida da registrare.');
+    writes.forEach(([ref, value]) => tx.create(ref, value));
+
+    const flag = (name) => updates[name] === true || t[name] === true;
+    let eligible = 0;
+    let completed = 0;
+    const count = (active, done) => { if (active) { eligible++; if (done) completed++; } };
+    count(config.consiglioAttivo && voterType !== 'STUDENTE', flag('voted_consiglio'));
+    count(config.rappresentantiIstitutoAttivo && voterType === 'STUDENTE', flag('voted_istituto'));
+    count(config.consultaAttiva && voterType === 'STUDENTE', flag('voted_consulta'));
+    count(config.rappresentantiClasseStudentiAttivo && voterType === 'STUDENTE', flag('voted_classe_studente'));
+    count(config.rappresentantiClasseGenitoriAttivo && voterType === 'GENITORE', flag('voted_classe_genitore'));
+    updates.hasVoted = eligible > 0 && completed >= eligible;
+    tx.update(tokenRef, updates);
+    return { fullyCompleted: updates.hasVoted, recordedBallots: writes.length };
+  });
+
+  // Nessun audit individuale del voto: evita correlazioni temporali elettore/scheda.
+  return { ok: true, ...result };
+});
+
+exports.commissionLogin = onCall({ region: REGION }, async (request) => {
+  const year = request.data?.annoScolastico;
+  const username = String(request.data?.username || '').trim().toLowerCase();
+  const password = String(request.data?.password || '');
+  const result = await authenticateStaff({ username, password, requestedRole: 'COMMISSIONE', year });
+  await auditAdmin({ uid: result.profile.id, role: 'COMMISSIONE' }, 'COMMISSION_LOGIN', { username });
+  return result;
+});
+
+exports.managementLogin = onCall({ region: REGION }, async (request) => {
+  const result = await authenticateStaff({
+    username: request.data?.username,
+    password: request.data?.password,
+    requestedRole: request.data?.requestedRole,
+    year: request.data?.annoScolastico
+  });
+  await auditAdmin({ uid: result.profile.id, role: result.profile.role }, 'STAFF_LOGIN', { username: result.profile.username });
+  return result;
+});
+
+exports.referentLogin = onCall({ region: REGION }, async (request) => {
+  const token = normalize(request.data?.token);
+  const type = normalize(request.data?.tipo);
+  const year = request.data?.annoScolastico;
+  if (!token || !['STUDENTE', 'GENITORE'].includes(type)) throw new HttpsError('invalid-argument', 'Dati non validi.');
+  const snap = await yearlyCollection('config', year).doc('referenti_keys').get();
+  const map = snap.exists ? (snap.data() || {}) : {};
+  const rec = map[token];
+  if (!rec || normalize(rec.tipo) !== type) throw new HttpsError('permission-denied', 'Codice referente non valido.');
+  const customToken = await admin.auth().createCustomToken(`referent-${crypto.randomUUID()}`, {
+    role: 'REFERENTE', scopeClass: rec.classe, referentType: rec.tipo
+  });
+  return { customToken, classe: rec.classe, tipo: rec.tipo };
+});
+
+exports.getAnonymousBallots = onCall({ region: REGION }, async (request) => {
+  const actor = requireAuth(request, ['COMMISSIONE', 'DIRIGENTE', 'VICEPRESIDE', 'DSGA', 'SEGRETERIA', 'REFERENTE']);
+  const collectionName = String(request.data?.collection || '');
+  const year = request.data?.annoScolastico;
+  if (!BALLOT_COLLECTIONS.has(collectionName)) throw new HttpsError('invalid-argument', 'Urna non valida.');
+
+  const config = await loadElectionConfig(year);
+  const phase = electionPhase(config);
+  let query = yearlyCollection(collectionName, year);
+
+  if (actor.role === 'REFERENTE') {
+    const required = actor.claims.referentType === 'STUDENTE' ? 'voti_classe_studenti' : 'voti_classe_genitori';
+    if (collectionName !== required) throw new HttpsError('permission-denied', 'Componente non autorizzata.');
+    query = query.where('classe', '==', actor.claims.scopeClass);
+  }
+
+  const snap = await query.get();
+  const sanitized = snap.docs.map((docSnap) => sanitizeStoredBallot(docSnap.data()));
+
+  // Durante la votazione nessun ruolo vede le preferenze parziali.
+  if (phase === 'BEFORE' || phase === 'OPEN') {
+    return { phase, ballots: makeTurnoutProjection(sanitized), aggregateOnly: true };
+  }
+
+  // La Commissione, a urne chiuse, può scrutinare schede già prive di identità e metadati.
+  if (actor.role === 'COMMISSIONE') {
+    return { phase, ballots: sanitized, aggregateOnly: false };
+  }
+
+  // Dirigenza/Segreteria e Referenti ricevono solo una proiezione aggregata,
+  // e solo quando gli esiti sono stati formalmente rilasciati.
+  if (phase !== 'RELEASED') {
+    return { phase, ballots: makeTurnoutProjection(sanitized), aggregateOnly: true };
+  }
+  return { phase, ballots: makeAggregateProjection(sanitized, collectionName), aggregateOnly: true };
+});
+
+exports.createStaffAccount = onCall({ region: REGION }, async (request) => {
+  const actor = requireAuth(request, ['COMMISSIONE']);
+  const year = request.data?.annoScolastico;
+  const name = String(request.data?.name || '').trim();
+  const username = String(request.data?.username || '').trim().toLowerCase();
+  const password = String(request.data?.password || '');
+  const role = normalize(request.data?.role);
+  const scopeClass = normalize(request.data?.scopeClass || 'TUTTE') || 'TUTTE';
+  if (!name || !/^[a-z0-9._-]{3,64}$/.test(username) || /[<>`"]/.test(name) || !/^[A-Z0-9 ._\/-]{1,32}$/.test(scopeClass) || password.length < 12 || !ALLOWED_STAFF_ROLES.has(role)) {
+    throw new HttpsError('invalid-argument', 'Dati account non validi. La password deve contenere almeno 12 caratteri.');
+  }
+  const collection = yearlyCollection('gestione_accessi', year);
+  const existing = await collection.where('username', '==', username).limit(1).get();
+  if (!existing.empty) throw new HttpsError('already-exists', 'Username già esistente.');
+  const salt = crypto.randomBytes(24).toString('hex');
+  const passwordHash = crypto.scryptSync(password, salt, 64).toString('hex');
+  const ref = collection.doc();
+  await ref.set({
+    name, username, passwordHash, passwordSalt: salt, role, scopeClass,
+    active: true, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdBy: actor.uid
+  });
+  await auditAdmin(actor, 'CREATE_STAFF_ACCOUNT', { accountId: ref.id, username, role, scopeClass });
+  return { ok: true, id: ref.id };
+});
+
+exports.setStaffAccountActive = onCall({ region: REGION }, async (request) => {
+  const actor = requireAuth(request, ['COMMISSIONE']);
+  const year = request.data?.annoScolastico;
+  const id = String(request.data?.id || '');
+  const active = request.data?.active === true;
+  if (!id) throw new HttpsError('invalid-argument', 'Account mancante.');
+  await yearlyCollection('gestione_accessi', year).doc(id).update({ active, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  await auditAdmin(actor, 'SET_STAFF_ACCOUNT_ACTIVE', { accountId: id, active });
+  return { ok: true };
+});
+
+exports.getSecurityStatus = onCall({ region: REGION }, async (request) => {
+  const actor = requireAuth(request, ['COMMISSIONE', 'DIRIGENTE', 'VICEPRESIDE', 'DSGA', 'SEGRETERIA']);
+  const year = request.data?.annoScolastico;
+  const config = await loadElectionConfig(year);
+  return {
+    ok: true,
+    role: actor.role,
+    phase: electionPhase(config),
+    controls: {
+      directBallotClientRead: false,
+      directBallotClientWrite: false,
+      ballotIdentityFields: false,
+      ballotTimestampFields: false,
+      staffRoleClaims: true,
+      adminAudit: true,
+      serverSideValidation: true,
+      serverSideVotingWindow: true,
+      sessionExpiryMinutes: 15
+    }
+  };
+});
+
+exports.destructiveAction = onCall({ region: REGION }, async (request) => {
+  const actor = requireAuth(request, ['COMMISSIONE']);
+  await auditAdmin(actor, 'BLOCKED_DESTRUCTIVE_ACTION', { requestedAction: String(request.data?.action || 'unspecified') });
+  throw new HttpsError(
+    'failed-precondition',
+    'Operazione distruttiva disabilitata dal canale web. È richiesta una procedura straordinaria offline, autorizzata e verbalizzata.'
+  );
+});
+
+exports.saveElectionConfig = onCall({ region: REGION }, async (request) => {
+  const actor = requireAuth(request, ['COMMISSIONE']);
+  const config = request.data?.config;
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw new HttpsError('invalid-argument', 'Configurazione non valida.');
+  }
+  const year = String(config.annoScolastico || request.data?.annoScolastico || '').trim();
+  if (!/^20\d{2}\/20\d{2}$/.test(year)) throw new HttpsError('invalid-argument', 'Anno scolastico non valido.');
+  // Limite difensivo contro payload anomali.
+  assertSafeConfigValue(config);
+  const serialized = JSON.stringify(config);
+  if (serialized.length > 700000) throw new HttpsError('invalid-argument', 'Configurazione troppo grande.');
+  await db.runTransaction(async (tx) => {
+    tx.set(globalConfigRef(), { annoScolastico: year }, { merge: true });
+    tx.set(yearlyConfigRef(year), { ...config, annoScolastico: year }, { merge: false });
+  });
+  await auditAdmin(actor, 'SAVE_ELECTION_CONFIG', { annoScolastico: year });
+  return { ok: true };
+});
+
+exports.ensureReferentKeys = onCall({ region: REGION }, async (request) => {
+  const actor = requireAuth(request, ['COMMISSIONE']);
+  const year = request.data?.annoScolastico;
+  const type = normalize(request.data?.tipo);
+  const classes = Array.isArray(request.data?.classes)
+    ? [...new Set(request.data.classes.map(normalize).filter(Boolean))].slice(0, 200)
+    : [];
+  if (!['STUDENTE', 'GENITORE'].includes(type) || !classes.length) {
+    throw new HttpsError('invalid-argument', 'Classi o componente non valide.');
+  }
+  const ref = yearlyCollection('config', year).doc('referenti_keys');
+  let result = {};
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const current = snap.exists ? (snap.data() || {}) : {};
+    for (const cls of classes) {
+      let found = Object.entries(current).find(([, v]) => normalize(v?.classe) === cls && normalize(v?.tipo) === type);
+      if (!found) {
+        let key;
+        do {
+          key = `REF-${type === 'STUDENTE' ? 'STU' : 'GEN'}-${crypto.randomBytes(10).toString('base64url').replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 12)}`;
+        } while (current[key]);
+        current[key] = { classe: cls, tipo: type };
+        found = [key, current[key]];
+      }
+      result[found[0]] = found[1];
+    }
+    tx.set(ref, current, { merge: false });
+  });
+  await auditAdmin(actor, 'ENSURE_REFERENT_KEYS', { tipo: type, classCount: classes.length });
+  return { keys: result };
+});
