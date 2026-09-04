@@ -1,0 +1,56 @@
+name: Assembla progetto iniziale
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".bootstrap/READY"
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ricostruisci pacchetto
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .bootstrap/part_* > /tmp/project.b64
+          base64 --decode /tmp/project.b64 > /tmp/project.zip
+          unzip -q /tmp/project.zip -d /tmp/extracted
+          ROOT="$(find /tmp/extracted -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          test -f "$ROOT/index.html"
+          rsync -a --delete --exclude='.git/' "$ROOT/" ./
+          test -f index.html
+          test -f functions/index.js
+          test -f firestore.rules
+
+      - name: Verifica preliminare
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check functions/index.js
+          ! grep -R --line-number --fixed-strings 'Levi8602P' index.html functions firestore.rules || false
+          if grep -R --line-number --fixed-strings 'Levi8602P' index.html functions firestore.rules; then exit 1; fi
+          if grep -R --line-number -E 'vote_id_[A-Za-z0-9_]*' index.html functions firestore.rules; then exit 1; fi
+
+      - name: Commit progetto completo
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nessuna modifica da committare"
+          else
+            git commit -m "Pubblica piattaforma elettorale completa e fascicolo MIM 3803/2026"
+            git push origin main
+          fi
