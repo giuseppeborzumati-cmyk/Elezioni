@@ -53,4 +53,4 @@ jobs:
         shell: bash
         run: rm -f "$RUNNER_TEMP/firebase-sa.json" "$RUNNER_TEMP/firebase-projects.json"
 
-# Redeploy requested after Firebase secret rotation on 2026-09-04.
+# Redeploy requested after IAM roles assignment on 2026-09-04.
