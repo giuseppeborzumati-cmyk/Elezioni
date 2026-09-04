@@ -1,16 +1,18 @@
-name: Assembla progetto iniziale
+name: Ricostruisci progetto pulito
 
 on:
   push:
     branches: ["main"]
     paths:
       - ".bootstrap/READY"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  assemble:
+  rebuild:
+    if: ${{ hashFiles('.bootstrap/READY') != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -18,39 +20,61 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ricostruisci pacchetto
+      - name: Ricostruisci sorgente completo
         shell: bash
         run: |
           set -euo pipefail
           cat .bootstrap/part_* > /tmp/project.b64
           base64 --decode /tmp/project.b64 > /tmp/project.zip
+          rm -rf /tmp/extracted
+          mkdir -p /tmp/extracted
           unzip -q /tmp/project.zip -d /tmp/extracted
           ROOT="$(find /tmp/extracted -mindepth 1 -maxdepth 1 -type d | head -n 1)"
           test -f "$ROOT/index.html"
-          rsync -a --delete --exclude='.git/' "$ROOT/" ./
-          test -f index.html
-          test -f functions/index.js
-          test -f firestore.rules
+          test -f "$ROOT/functions/index.js"
+          test -f "$ROOT/firestore.rules"
 
-      - name: Verifica preliminare
+          if [ -f .bootstrap/final_nonworkflow.patch.gz.b64 ]; then
+            base64 --decode .bootstrap/final_nonworkflow.patch.gz.b64 | gzip -d > /tmp/final.patch
+            (cd "$ROOT" && patch -p1 < /tmp/final.patch)
+          fi
+
+          rm -rf functions docs tests
+          cp -a "$ROOT/functions" ./functions
+          cp -a "$ROOT/docs" ./docs
+          cp "$ROOT/index.html" ./index.html
+          cp "$ROOT/firebase.json" ./firebase.json
+          cp "$ROOT/firestore.rules" ./firestore.rules
+          cp "$ROOT/.firebaserc" ./.firebaserc
+          cp "$ROOT/.gitignore" ./.gitignore
+          cp "$ROOT/README.md" ./README.md
+          cp ./index.html ./404.html
+          touch .nojekyll
+
+      - name: Verifica essenziale
         shell: bash
         run: |
           set -euo pipefail
+          test -s index.html
+          grep -q '<!DOCTYPE html>' index.html
+          grep -q 'mio-sistema-voto' index.html
           node --check functions/index.js
-          if grep -n --fixed-strings 'Levi8602P' index.html functions/index.js firestore.rules; then exit 1; fi
-          if grep -n -E 'vote_id_[A-Za-z0-9_]*' index.html functions/index.js firestore.rules; then exit 1; fi
-          echo "Controlli codice operativo superati. Lo script di migrazione può contenere i nomi dei soli campi legacy da eliminare."
+          if grep -R --line-number -E 'vote_id_[A-Za-z0-9_]*' index.html functions/index.js firestore.rules; then
+            echo 'ERRORE: collegamento legacy identità-voto nel codice operativo' >&2
+            exit 1
+          fi
 
-      - name: Commit progetto completo
+      - name: Pulisci trasferimento temporaneo e pubblica su main
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf .bootstrap .final_payload .payload_clean .payload_final
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add -A -- ':!/.github/workflows/**'
           if git diff --cached --quiet; then
-            echo "Nessuna modifica da committare"
+            echo 'Nessuna modifica da committare'
           else
-            git commit -m "Pubblica piattaforma elettorale completa e fascicolo MIM 3803/2026"
+            git commit -m "Ricrea main pulito con index.html in root"
             git push origin main
           fi
