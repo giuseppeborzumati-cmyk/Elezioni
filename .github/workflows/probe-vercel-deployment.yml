@@ -1,0 +1,27 @@
+name: Probe deployment Vercel
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/probe-vercel-deployment.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe nuovo deployment
+        shell: bash
+        run: |
+          set +e
+          BASE='https://elezioni-primo-levi-vercel-lwwqdysps-giuseppeborzumati-2630.vercel.app'
+          echo '=== ROOT SPECIFICO ==='
+          curl -sS -i --max-time 20 "$BASE/" | head -n 30
+          echo
+          echo '=== HEALTH SPECIFICO ==='
+          curl -sS -i --max-time 20 "$BASE/api/health"
+          echo
+          exit 0
