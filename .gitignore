@@ -1,0 +1,13 @@
+node_modules/
+.firebase/
+firebase-debug.log
+*.log
+.env
+.env.*
+*.local
+*service-account*.json
+serviceAccount*.json
+credentials*.json
+secrets*.json
+.DS_Store
+Thumbs.db
