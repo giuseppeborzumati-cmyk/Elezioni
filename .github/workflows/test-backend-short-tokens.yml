@@ -1,0 +1,18 @@
+name: Test backend dopo token brevi
+on:
+  push:
+    branches: ["main"]
+    paths: [".github/workflows/test-backend-short-tokens.yml"]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Attendi produzione e verifica health
+        run: |
+          for i in {1..18}; do
+            BODY=$(curl -fsS https://elezioni-primo-levi-vercel.vercel.app/api/health || true)
+            echo "$BODY"
+            if echo "$BODY" | grep -q '"firebase":true'; then exit 0; fi
+            sleep 5
+          done
+          exit 1
