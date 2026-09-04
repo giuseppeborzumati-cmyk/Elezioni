@@ -1,0 +1,33 @@
+name: Collega frontend a Vercel
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/apply-vercel-frontend.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Applica collegamento Vercel
+        run: python scripts/patch_frontend_vercel_prod.py
+      - name: Verifica HTML e riferimenti
+        run: |
+          grep -q "VERCEL_BACKEND_URL" index.html
+          grep -q "elezioni-primo-levi-vercel.vercel.app" index.html
+          grep -q "VERCEL_BACKEND_URL" 404.html
+      - name: Commit modifiche
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html 404.html
+          git commit -m "Collega autenticazione e API al backend Vercel"
+          git push
