@@ -1,0 +1,36 @@
+name: Token brevi e apertura semplice
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/token-opening-simple.yml"
+      - "scripts/token_3digits.py"
+      - "scripts/ref_3digits.py"
+      - "scripts/opening_simple.py"
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/token_3digits.py
+      - run: python3 scripts/ref_3digits.py
+      - run: python3 scripts/opening_simple.py
+      - name: Verifica
+        run: |
+          grep -q "STU123" index.html
+          grep -q "nextUniqueThreeDigitToken" index.html
+          grep -q "APERTURA VOTAZIONI" index.html
+          grep -q "openElectionNow" index.html
+          grep -q "REF-STU" functions/index.js
+          grep -q "REF-REF" functions/index.js
+          node --check functions/index.js
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html 404.html functions/index.js
+          git diff --cached --quiet && exit 0
+          git commit -m "Token a tre cifre e apertura votazioni semplificata"
+          git push
