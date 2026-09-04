@@ -1,0 +1,11 @@
+'use strict';
+const admin=require('firebase-admin');
+admin.initializeApp();
+const db=admin.firestore();
+const APP='iis-levi-electoral-v3';
+const arg=n=>{const i=process.argv.indexOf('--'+n);return i>=0?process.argv[i+1]:''};
+const year=arg('year')||'2026/2027',s=year.replace('/','_');
+const root=db.collection('artifacts').doc(APP).collection('public').doc('data');
+const urne=['voti_consiglio','voti_istituto','voti_consulta','voti_classe_studenti','voti_classe_genitori'];
+const forbidden=['token','tokenHash','tokenDocId','sessionId','sessionHash','nome','email','uid','createdAt','timestamp','dataVoto','ip','userAgent','ballotId'];
+(async()=>{let errors=0;const cfg=await root.collection('config').doc('yearly_settings_'+s).get();if(!cfg.exists){console.error('KO configurazione annuale assente');errors++}else console.log('OK configurazione annuale');const tok=await root.collection('tokens_'+s).limit(500).get();tok.forEach(d=>{for(const k of Object.keys(d.data()))if(/^vote_id_/i.test(k)){console.error('KO token legacy con',k,d.id);errors++}});console.log('Token controllati:',tok.size);for(const u of urne){const snap=await root.collection(u+'_'+s).limit(500).get();for(const d of snap.docs){const keys=Object.keys(d.data());for(const k of keys)if(forbidden.includes(k)||/^vote_id_/i.test(k)){console.error('KO metadato vietato',u,d.id,k);errors++}}console.log('Urna',u,'schede controllate',snap.size)}if(errors){console.error('PREFLIGHT FALLITO:',errors,'anomalie');process.exit(1)}console.log('PREFLIGHT OK — nessun collegamento identità/scheda rilevato nei campioni controllati.');process.exit(0)})().catch(e=>{console.error(e);process.exit(1)});
