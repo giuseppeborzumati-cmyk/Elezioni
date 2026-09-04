@@ -70,6 +70,9 @@ function requireAuth(request, allowedRoles = []) {
       throw new HttpsError('permission-denied', 'Credenziali gestionali scadute. Effettuare un nuovo accesso con credenziali valide.');
     }
   }
+  if (role === 'COMMISSIONE' && request.auth.token.mustChangePassword === true) {
+    throw new HttpsError('failed-precondition', 'Cambio password obbligatorio prima di utilizzare le funzioni della Commissione.');
+  }
   return { uid: request.auth.uid, role, claims: request.auth.token };
 }
 
@@ -278,6 +281,7 @@ async function authenticateStaff({ username, password, requestedRole, year }) {
     role,
     scopeClass: record.scopeClass || 'TUTTE',
     staffAccountId: docSnap.id,
+    mustChangePassword: record.mustChangePassword === true,
     ...(expiresAt ? { staffExpiresAt: Math.floor(expiresAt.getTime() / 1000) } : {})
   };
   const customToken = await admin.auth().createCustomToken(`staff-${docSnap.id}-${crypto.randomUUID()}`, claims);
@@ -289,6 +293,7 @@ async function authenticateStaff({ username, password, requestedRole, year }) {
       username: uname,
       role,
       scopeClass: record.scopeClass || 'TUTTE',
+      mustChangePassword: record.mustChangePassword === true,
       ...(expiresAt ? { expiresAt: expiresAt.toISOString(), expiresOn: expiryLabel(expiresAt) } : {})
     }
   };
@@ -608,6 +613,68 @@ exports.commissionLogin = onCall({ region: REGION }, async (request) => {
   const result = await authenticateStaff({ username, password, requestedRole: 'COMMISSIONE', year });
   await auditAdmin({ uid: result.profile.id, role: 'COMMISSIONE' }, 'COMMISSION_LOGIN', { username });
   return result;
+});
+
+
+exports.changeCommissionPassword = onCall({ region: REGION }, async (request) => {
+  if (!request.auth || normalize(request.auth.token.role) !== 'COMMISSIONE') {
+    throw new HttpsError('unauthenticated', 'Sessione Commissione richiesta.');
+  }
+  const accountId = String(request.auth.token.staffAccountId || '').trim();
+  const year = String(request.data?.annoScolastico || '').trim();
+  const newPassword = String(request.data?.newPassword || '');
+  const confirmPassword = String(request.data?.confirmPassword || '');
+  if (!accountId || !/^20\d{2}\/20\d{2}$/.test(year)) {
+    throw new HttpsError('invalid-argument', 'Account o anno scolastico non validi.');
+  }
+  if (newPassword !== confirmPassword) {
+    throw new HttpsError('invalid-argument', 'Le due password non coincidono.');
+  }
+  if (newPassword.length < 16 || newPassword.length > 128 || !/[A-Z]/.test(newPassword) || !/[a-z]/.test(newPassword) || !/[0-9]/.test(newPassword) || !/[^A-Za-z0-9]/.test(newPassword)) {
+    throw new HttpsError('invalid-argument', 'La nuova password deve contenere almeno 16 caratteri, maiuscole, minuscole, numeri e simboli.');
+  }
+
+  const ref = yearlyCollection('gestione_accessi', year).doc(accountId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError('not-found', 'Account Commissione non trovato.');
+  const record = snap.data() || {};
+  if (normalize(record.role) !== 'COMMISSIONE' || record.active === false) {
+    throw new HttpsError('permission-denied', 'Account Commissione non autorizzato.');
+  }
+  if (!verifyScryptPassword(newPassword, record) && !legacyPasswordMatches(newPassword, record)) {
+    const salt = crypto.randomBytes(24).toString('hex');
+    const passwordHash = crypto.scryptSync(newPassword, salt, 64).toString('hex');
+    await ref.update({
+      passwordSalt: salt,
+      passwordHash,
+      mustChangePassword: false,
+      bootstrapAccount: false,
+      passwordChangedAt: admin.firestore.FieldValue.serverTimestamp(),
+      passwordChangedBy: accountId
+    });
+  } else {
+    throw new HttpsError('invalid-argument', 'La nuova password deve essere diversa dalla password temporanea o precedente.');
+  }
+
+  const claims = {
+    role: 'COMMISSIONE',
+    scopeClass: record.scopeClass || 'TUTTE',
+    staffAccountId: accountId,
+    mustChangePassword: false
+  };
+  const customToken = await admin.auth().createCustomToken(`staff-${accountId}-${crypto.randomUUID()}`, claims);
+  await auditAdmin({ uid: accountId, role: 'COMMISSIONE' }, 'COMMISSION_PASSWORD_CHANGED', { accountId });
+  return {
+    ok: true,
+    customToken,
+    profile: {
+      id: accountId,
+      name: record.name || 'Commissione Elettorale',
+      username: record.username || '',
+      role: 'COMMISSIONE',
+      mustChangePassword: false
+    }
+  };
 });
 
 exports.managementLogin = onCall({ region: REGION }, async (request) => {

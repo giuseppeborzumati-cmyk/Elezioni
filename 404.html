@@ -348,6 +348,7 @@
             validateVoterToken: httpsCallable(functions, 'validateVoterToken'),
             castVote: httpsCallable(functions, 'castVote'),
             commissionLogin: httpsCallable(functions, 'commissionLogin'),
+            changeCommissionPassword: httpsCallable(functions, 'changeCommissionPassword'),
             managementLogin: httpsCallable(functions, 'managementLogin'),
             referentLogin: httpsCallable(functions, 'referentLogin'),
             getAnonymousBallots: httpsCallable(functions, 'getAnonymousBallots'),
@@ -723,6 +724,7 @@
                 case 'classMasterLogin': renderClassMasterLogin(container); break;
                 case 'classMasterDashboard': renderClassMasterDashboard(container); break;
                 case 'adminLogin': renderAdminLogin(container); break;
+                case 'commissionPasswordChange': renderCommissionPasswordChange(container); break;
                 case 'adminPanel': renderAdminPanel(container); break;
                 case 'managementLogin': renderManagementLogin(container); break;
                 case 'managementDashboard': renderManagementDashboard(container); break;
@@ -1763,12 +1765,75 @@
             try {
                 const res = await SECURE_API.commissionLogin({ username, password, annoScolastico: configElezioni.annoScolastico });
                 await signInWithCustomToken(auth, res.data.customToken);
+                resetIdleTimer();
+                if (res.data?.profile?.mustChangePassword === true) {
+                    showPage('commissionPasswordChange');
+                    return;
+                }
                 activeAdminTab = 'config';
                 startTokensListener();
-                resetIdleTimer();
                 showPage('adminPanel');
             } catch (e) {
                 showNotification('Accesso negato','Credenziali non valide o servizio di autenticazione non disponibile.','error');
+            }
+        };
+
+
+        function renderCommissionPasswordChange(container) {
+            container.innerHTML = `
+                <div class="max-w-lg mx-auto bg-white/95 backdrop-blur-md p-8 rounded-2xl shadow-xl border border-amber-200 mt-8 animate-fade-in w-full font-semibold">
+                    <div class="text-center mb-6">
+                        <i data-lucide="key-round" class="mx-auto w-12 h-12 text-amber-600 mb-2"></i>
+                        <h2 class="text-xl font-black text-slate-800">Cambio password obbligatorio</h2>
+                        <p class="text-xs text-slate-500 mt-2">La credenziale iniziale della Commissione è temporanea. Prima di accedere al pannello amministrativo devi impostare una password personale.</p>
+                    </div>
+                    <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[10px] text-amber-950 mb-5">
+                        La nuova password deve avere almeno <b>16 caratteri</b> e contenere maiuscole, minuscole, numeri e simboli. Non riutilizzare la password temporanea e non comunicarla via e-mail o chat.
+                    </div>
+                    <form onsubmit="event.preventDefault(); window.changeInitialCommissionPassword();" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 mb-1">Nuova password</label>
+                            <input id="commissionNewPwd" type="password" minlength="16" maxlength="128" autocomplete="new-password" required class="w-full border border-slate-300 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-900 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 mb-1">Ripeti nuova password</label>
+                            <input id="commissionNewPwd2" type="password" minlength="16" maxlength="128" autocomplete="new-password" required class="w-full border border-slate-300 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-900 outline-none">
+                        </div>
+                        <button type="submit" class="w-full bg-blue-900 hover:bg-blue-800 text-white font-black rounded-xl py-3 text-xs uppercase tracking-wide">Salva nuova password e accedi</button>
+                    </form>
+                    <button onclick="window.logoutCommissionForcedChange()" class="w-full mt-3 text-[10px] text-slate-500 hover:text-slate-800 underline">Annulla e disconnetti</button>
+                </div>`;
+            if (window.lucide) lucide.createIcons();
+        }
+
+        window.logoutCommissionForcedChange = async function() {
+            try { await signOut(auth); } catch(e) {}
+            showPage('adminLogin');
+        };
+
+        window.changeInitialCommissionPassword = async function() {
+            const p1 = document.getElementById('commissionNewPwd')?.value || '';
+            const p2 = document.getElementById('commissionNewPwd2')?.value || '';
+            if (p1 !== p2) return showNotification('Password diverse','Le due password non coincidono.','error');
+            if (p1.length < 16 || !/[A-Z]/.test(p1) || !/[a-z]/.test(p1) || !/[0-9]/.test(p1) || !/[^A-Za-z0-9]/.test(p1)) {
+                return showNotification('Password non sufficientemente robusta','Usa almeno 16 caratteri con maiuscole, minuscole, numeri e simboli.','error');
+            }
+            try {
+                const res = await SECURE_API.changeCommissionPassword({
+                    annoScolastico: configElezioni.annoScolastico,
+                    newPassword: p1,
+                    confirmPassword: p2
+                });
+                await signOut(auth);
+                await signInWithCustomToken(auth, res.data.customToken);
+                activeAdminTab = 'config';
+                startTokensListener();
+                resetIdleTimer();
+                showNotification('Password aggiornata','La password temporanea è stata revocata. Conserva la nuova password in modo sicuro.','success');
+                showPage('adminPanel');
+            } catch (e) {
+                console.error(e);
+                showNotification('Cambio password non riuscito', e?.message || 'Operazione non completata.', 'error');
             }
         };
 
