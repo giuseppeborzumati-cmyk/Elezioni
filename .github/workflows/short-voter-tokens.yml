@@ -1,0 +1,29 @@
+name: Accorcia token cabina
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/short-voter-tokens.yml"
+      - "scripts/short_voter_tokens.py"
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/short_voter_tokens.py
+      - name: Verifica
+        run: |
+          grep -q "generateShortVoterToken" index.html
+          grep -q "23456789ABCDEFGHJKMNPQRSTUVWXYZ" index.html
+          if grep -q "generateRandomSuffix(20)" index.html; then exit 1; fi
+          if grep -q "generateRandomSuffix(24)" index.html; then exit 1; fi
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html 404.html
+          git diff --cached --quiet && exit 0
+          git commit -m "Accorcia e semplifica i token di accesso alla cabina"
+          git push
