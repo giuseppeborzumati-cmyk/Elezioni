@@ -32,6 +32,15 @@ const BALLOT_COLLECTIONS = new Set([
   'voti_classe_studenti', 'voti_classe_genitori'
 ]);
 
+const REGULARITY_PRE_VOTE_CONTROLS = Object.freeze([
+  'annualCircularRecorded','commissionAppointed','voterRollFinal','candidateListsValidated',
+  'ballotApproved','privacyChecked','technicalTestPassed','softwareFrozen',
+  'backupPlanReady','incidentPlanReady','communicationPublished'
+]);
+const REGULARITY_ALL_CONTROLS = new Set([...REGULARITY_PRE_VOTE_CONTROLS,'finalArchiveSealed','appealWindowClosed']);
+const regularityStateRef = (year) => yearlyCollection('regolarita', year).doc('state');
+const regularityAppeals = (year) => yearlyCollection('reclami_ricorsi', year);
+const regularityEvents = (year) => yearlyCollection('eventi_procedimento', year);
 const yearSuffix = (year) => String(year || '2026/2027').replace('/', '_');
 const dataRoot = () => db.collection('artifacts').doc(APP_ID).collection('public').doc('data');
 const yearlyCollection = (name, year) => dataRoot().collection(`${name}_${yearSuffix(year)}`);
@@ -199,6 +208,34 @@ function expiryLabel(expiry) {
   }).format(new Date(expiry.getTime() - 1000));
 }
 
+function emptyRegularityState() {
+  return {
+    annualCircularRecorded:false,commissionAppointed:false,voterRollFinal:false,candidateListsValidated:false,
+    ballotApproved:false,privacyChecked:false,technicalTestPassed:false,softwareFrozen:false,
+    backupPlanReady:false,incidentPlanReady:false,communicationPublished:false,resultsPublished:false,
+    appealWindowClosed:false,finalArchiveSealed:false,legalHold:false,procedureClosed:false,
+    emergencySuspended:false,notes:{}
+  };
+}
+async function loadRegularityState(year) {
+  const snap = await regularityStateRef(year).get();
+  return {...emptyRegularityState(),...(snap.exists ? snap.data() : {})};
+}
+function regularityMissing(state) { return REGULARITY_PRE_VOTE_CONTROLS.filter(k => state[k] !== true); }
+function timestampIso(v) {
+  if (!v) return null;
+  if (typeof v.toDate === 'function') return v.toDate().toISOString();
+  const d = v instanceof Date ? v : new Date(v); return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+function serializeRegularityState(state) {
+  const out={...state}; ['updatedAt','resultsPublishedAt','procedureClosedAt','lastIncidentAt'].forEach(k=>{if(out[k])out[k]=timestampIso(out[k]);}); return out;
+}
+async function assertElectionReadyForVoting(year) {
+  const s=await loadRegularityState(year), missing=regularityMissing(s);
+  if(s.procedureClosed) throw new HttpsError('failed-precondition','Procedimento elettorale definitivamente chiuso.');
+  if(s.emergencySuspended) throw new HttpsError('failed-precondition','Votazione sospesa dalla Commissione per evento verbalizzato.');
+  if(missing.length) throw new HttpsError('failed-precondition',`Apertura bloccata: controlli di regolarità incompleti (${missing.join(', ')}).`);
+}
 async function authenticateStaff({ username, password, requestedRole, year }) {
   const role = normalize(requestedRole);
   const uname = String(username || '').trim().toLowerCase();
@@ -443,6 +480,7 @@ exports.validateVoterToken = onCall({ region: REGION, enforceAppCheck: false }, 
   const year = request.data?.annoScolastico;
   if (!token || token.length > 80) throw new HttpsError('invalid-argument', 'Token non valido.');
   const config = await loadElectionConfig(year);
+  await assertElectionReadyForVoting(year);
   assertVotingOpen(config);
 
   const tokenRef = yearlyCollection('tokens', year).doc(token);
@@ -483,6 +521,7 @@ exports.castVote = onCall({ region: REGION, enforceAppCheck: false }, async (req
   const submitted = request.data?.ballots || {};
   if (!sessionId || sessionId.length > 200) throw new HttpsError('unauthenticated', 'Sessione di voto non valida.');
   const config = await loadElectionConfig(year);
+  await assertElectionReadyForVoting(year);
   assertVotingOpen(config);
   const sessionHash = sha256(sessionId);
 
@@ -710,6 +749,84 @@ exports.setStaffAccountActive = onCall({ region: REGION }, async (request) => {
   return { ok: true };
 });
 
+exports.getRegularityState = onCall({region:REGION}, async request => {
+  requireAuth(request,['COMMISSIONE','DIRIGENTE','VICEPRESIDE','DSGA','SEGRETERIA']);
+  const year=request.data?.annoScolastico, state=await loadRegularityState(year);
+  const snap=await regularityAppeals(year).orderBy('filedAt','desc').limit(100).get();
+  const appeals=snap.docs.map(d=>{const x=d.data()||{};return{id:d.id,protocolRef:x.protocolRef||'',subject:x.subject||'',status:x.status||'OPEN',decisionRef:x.decisionRef||'',filedAt:timestampIso(x.filedAt),decidedAt:timestampIso(x.decidedAt)}});
+  const missing=regularityMissing(state);
+  return{state:serializeRegularityState(state),appeals,missing,readyForVoting:missing.length===0&&!state.emergencySuspended&&!state.procedureClosed};
+});
+
+exports.setRegularityControl = onCall({region:REGION}, async request => {
+  const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico;
+  const control=String(request.data?.control||''),value=request.data?.value===true,note=String(request.data?.note||'').trim().slice(0,1000);
+  if(!REGULARITY_ALL_CONTROLS.has(control)) throw new HttpsError('invalid-argument','Controllo non valido.');
+  const config=await loadElectionConfig(year);
+  if(REGULARITY_PRE_VOTE_CONTROLS.includes(control)&&electionPhase(config)!=='BEFORE') throw new HttpsError('failed-precondition','I controlli preliminari non sono modificabili dopo l’apertura della finestra elettorale.');
+  const ref=regularityStateRef(year);
+  await db.runTransaction(async tx=>{const snap=await tx.get(ref),cur={...emptyRegularityState(),...(snap.exists?snap.data():{})};tx.set(ref,{[control]:value,notes:{...(cur.notes||{}),[control]:note},updatedAt:admin.firestore.FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});});
+  await regularityEvents(year).add({type:'CONTROL_UPDATE',control,value,note,actorUid:actor.uid,at:admin.firestore.FieldValue.serverTimestamp()});
+  await auditAdmin(actor,'REGULARITY_CONTROL_UPDATE',{control,value}); return{ok:true};
+});
+
+exports.recordResultsPublication = onCall({region:REGION}, async request => {
+  const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico;
+  const protocolRef=String(request.data?.protocolRef||'').trim().slice(0,160), appealDeadline=String(request.data?.appealDeadline||'').trim();
+  if(!protocolRef||!/^\d{4}-\d{2}-\d{2}$/.test(appealDeadline)) throw new HttpsError('invalid-argument','Inserire estremi pubblicazione e termine ricorsi AAAA-MM-GG.');
+  if(electionPhase(await loadElectionConfig(year))==='OPEN') throw new HttpsError('failed-precondition','Non è possibile pubblicare risultati a urne aperte.');
+  await regularityStateRef(year).set({resultsPublished:true,resultsPublishedAt:admin.firestore.FieldValue.serverTimestamp(),resultsPublicationProtocol:protocolRef,appealDeadline,appealWindowClosed:false,legalHold:true,updatedAt:admin.firestore.FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
+  await regularityEvents(year).add({type:'RESULTS_PUBLICATION',protocolRef,appealDeadline,actorUid:actor.uid,at:admin.firestore.FieldValue.serverTimestamp()});
+  await auditAdmin(actor,'RESULTS_PUBLICATION_RECORDED',{protocolRef,appealDeadline}); return{ok:true};
+});
+
+exports.fileElectoralAppeal = onCall({region:REGION}, async request => {
+  const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico;
+  const protocolRef=String(request.data?.protocolRef||'').trim().slice(0,160),subject=String(request.data?.subject||'').trim().slice(0,1000);
+  if(!protocolRef||!subject) throw new HttpsError('invalid-argument','Protocollo e oggetto obbligatori.');
+  const ref=regularityAppeals(year).doc(); await ref.set({protocolRef,subject,status:'OPEN',filedAt:admin.firestore.FieldValue.serverTimestamp(),createdBy:actor.uid});
+  await regularityStateRef(year).set({legalHold:true,appealWindowClosed:false,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
+  await auditAdmin(actor,'ELECTORAL_APPEAL_FILED',{appealId:ref.id,protocolRef}); return{ok:true,id:ref.id};
+});
+
+exports.resolveElectoralAppeal = onCall({region:REGION}, async request => {
+  const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico,id=String(request.data?.id||''),decisionRef=String(request.data?.decisionRef||'').trim().slice(0,200);
+  if(!id||!decisionRef) throw new HttpsError('invalid-argument','Ricorso e decisione obbligatori.');
+  const ref=regularityAppeals(year).doc(id),snap=await ref.get(); if(!snap.exists) throw new HttpsError('not-found','Ricorso non trovato.');
+  await ref.update({status:'RESOLVED',decisionRef,decidedAt:admin.firestore.FieldValue.serverTimestamp(),decidedBy:actor.uid});
+  await auditAdmin(actor,'ELECTORAL_APPEAL_RESOLVED',{appealId:id,decisionRef}); return{ok:true};
+});
+
+exports.recordElectoralIncident = onCall({region:REGION}, async request => {
+  const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico;
+  const protocolRef=String(request.data?.protocolRef||'').trim().slice(0,160),title=String(request.data?.title||'').trim().slice(0,200),details=String(request.data?.details||'').trim().slice(0,2000),suspend=request.data?.suspend===true;
+  if(!title||!details) throw new HttpsError('invalid-argument','Titolo e descrizione obbligatori.');
+  await regularityEvents(year).add({type:'INCIDENT',protocolRef,title,details,suspend,actorUid:actor.uid,at:admin.firestore.FieldValue.serverTimestamp()});
+  await regularityStateRef(year).set({emergencySuspended:suspend,lastIncidentAt:admin.firestore.FieldValue.serverTimestamp(),updatedAt:admin.firestore.FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
+  await auditAdmin(actor,'ELECTORAL_INCIDENT_RECORDED',{protocolRef,title,suspend}); return{ok:true};
+});
+
+exports.setEmergencySuspension = onCall({region:REGION}, async request => {
+  const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico,suspended=request.data?.suspended===true,reason=String(request.data?.reason||'').trim().slice(0,1000);
+  if(!reason) throw new HttpsError('invalid-argument','Motivazione obbligatoria.');
+  await regularityStateRef(year).set({emergencySuspended:suspended,suspensionReason:reason,updatedAt:admin.firestore.FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
+  await regularityEvents(year).add({type:suspended?'SUSPENSION':'RESUMPTION',reason,actorUid:actor.uid,at:admin.firestore.FieldValue.serverTimestamp()});
+  await auditAdmin(actor,suspended?'ELECTION_SUSPENDED':'ELECTION_RESUMED',{}); return{ok:true};
+});
+
+exports.closeElectoralProcedure = onCall({region:REGION}, async request => {
+  const actor=requireAuth(request,['COMMISSIONE']),year=request.data?.annoScolastico,closureRef=String(request.data?.closureRef||'').trim().slice(0,200);
+  if(!closureRef) throw new HttpsError('invalid-argument','Estremi verbale di chiusura obbligatori.');
+  if(electionPhase(await loadElectionConfig(year))==='OPEN') throw new HttpsError('failed-precondition','Le urne sono ancora aperte.');
+  const state=await loadRegularityState(year); if(!state.resultsPublished||!state.appealWindowClosed||!state.finalArchiveSealed) throw new HttpsError('failed-precondition','Completare pubblicazione, ricorsi e sigillo fascicolo.');
+  const open=await regularityAppeals(year).where('status','==','OPEN').limit(1).get(); if(!open.empty) throw new HttpsError('failed-precondition','Esistono ricorsi ancora aperti.');
+  const accounts=await yearlyCollection('gestione_accessi',year).get(); let count=0,batch=db.batch();
+  for(const d of accounts.docs){if(MANAGEMENT_ROLES.has(normalize(d.data()?.role))){batch.update(d.ref,{active:false,closedProcedureRevocationAt:admin.firestore.FieldValue.serverTimestamp(),closedProcedureRevocationRef:closureRef});count++;if(count%400===0){await batch.commit();batch=db.batch();}}}
+  if(count%400!==0) await batch.commit();
+  await regularityStateRef(year).set({procedureClosed:true,procedureClosedAt:admin.firestore.FieldValue.serverTimestamp(),closureRef,legalHold:false,emergencySuspended:false,updatedAt:admin.firestore.FieldValue.serverTimestamp(),updatedBy:actor.uid},{merge:true});
+  await regularityEvents(year).add({type:'PROCEDURE_CLOSED',closureRef,revokedManagementAccounts:count,actorUid:actor.uid,at:admin.firestore.FieldValue.serverTimestamp()});
+  await auditAdmin(actor,'ELECTORAL_PROCEDURE_CLOSED',{closureRef,revokedManagementAccounts:count}); return{ok:true,revokedManagementAccounts:count};
+});
 exports.getSecurityStatus = onCall({ region: REGION }, async (request) => {
   const actor = requireAuth(request, ['COMMISSIONE', 'DIRIGENTE', 'VICEPRESIDE', 'DSGA', 'SEGRETERIA']);
   const year = request.data?.annoScolastico;
