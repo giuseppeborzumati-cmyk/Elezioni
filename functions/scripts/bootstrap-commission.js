@@ -9,14 +9,12 @@
  * - l'account nasce con mustChangePassword=true;
  * - al primo accesso la Commissione deve sostituire la password prima di usare
  *   qualunque funzione amministrativa.
- *
- * Questo script richiede credenziali Google/Firebase amministrative tramite
- * GOOGLE_APPLICATION_CREDENTIALS/ADC ed è richiamato dal workflow di deploy.
  */
-const admin = require('firebase-admin');
+const { initializeApp, getApps } = require('firebase-admin/app');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
-if (!admin.apps.length) admin.initializeApp();
-const db = admin.firestore();
+if (!getApps().length) initializeApp();
+const db = getFirestore();
 
 const APP_ID = 'iis-levi-electoral-v3';
 const YEAR = '2026/2027';
@@ -50,8 +48,8 @@ function collectionForYear(year) {
     passwordSalt: PASSWORD_SALT,
     mustChangePassword: true,
     bootstrapAccount: true,
-    bootstrapVersion: '2026-09-04b',
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    bootstrapVersion: '2026-09-04c',
+    createdAt: FieldValue.serverTimestamp(),
     createdBy: 'SECURE_BOOTSTRAP_DEPLOY'
   });
 
