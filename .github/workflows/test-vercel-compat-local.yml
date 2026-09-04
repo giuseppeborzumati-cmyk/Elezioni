@@ -1,0 +1,88 @@
+name: Collaudo compat layer Vercel
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/test-vercel-compat-local.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_MIO_SISTEMA_VOTO }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Prepara dipendenza Firebase Admin
+        run: |
+          mkdir -p /tmp/vercel-compat
+          cd /tmp/vercel-compat
+          npm init -y >/dev/null
+          npm install firebase-admin@14.3.0 --no-audit --no-fund >/dev/null
+      - name: Collauda backend senza firebase-functions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/vercel-compat
+          cat > test.js <<'NODE'
+          'use strict';
+          const Module = require('module');
+          const { initializeApp, cert, getApps } = require('firebase-admin/app');
+          const { getFirestore } = require('firebase-admin/firestore');
+          const { getAuth } = require('firebase-admin/auth');
+
+          const IMPORT = "const { onCall, HttpsError } = require('firebase-functions/v2/https');";
+          const SHIM = `class HttpsError extends Error {
+            constructor(code, message, details) { super(String(message || 'Operazione non completata.')); this.name='HttpsError'; this.code=String(code || 'internal'); this.details=details; }
+          }
+          function onCall(optionsOrHandler, maybeHandler) {
+            const handler = typeof optionsOrHandler === 'function' ? optionsOrHandler : maybeHandler;
+            if (typeof handler !== 'function') throw new Error('Handler callable non valido.');
+            return Object.freeze({ run: handler });
+          }`;
+
+          async function main() {
+            const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+            if (!raw) throw new Error('Secret Firebase mancante');
+            const sa = JSON.parse(raw);
+            if (sa.project_id !== 'mio-sistema-voto') throw new Error('Project ID inatteso');
+
+            const response = await fetch('https://raw.githubusercontent.com/giuseppeborzumati-cmyk/Elezioni/6935eaa/functions/index.js');
+            if (!response.ok) throw new Error(`Backend HTTP ${response.status}`);
+            let source = await response.text();
+            if (!source.includes(IMPORT)) throw new Error('Import atteso non trovato');
+            source = source.replace(IMPORT, SHIM);
+            if (source.includes("require('firebase-functions")) throw new Error('Dipendenza firebase-functions residua');
+
+            const filename = '/tmp/vercel-compat/backend.js';
+            const mod = new Module(filename, module);
+            mod.filename = filename;
+            mod.paths = module.paths.slice();
+            mod._compile(source, filename);
+            const backend = mod.exports;
+            if (!backend.commissionLogin || typeof backend.commissionLogin.run !== 'function') throw new Error('commissionLogin non caricata');
+
+            const col = getFirestore().collection('artifacts').doc('iis-levi-electoral-v3').collection('public').doc('data').collection('gestione_accessi_2026_2027');
+            const snap = await col.where('username','==','commissione.presidente').limit(1).get();
+            if (snap.empty) throw new Error('Account Commissione non trovato');
+
+            const token = await getAuth().createCustomToken('compat-healthcheck', { role: 'HEALTHCHECK' });
+            if (!token || token.length < 20) throw new Error('Creazione token fallita');
+
+            let rejectedCorrectly = false;
+            try {
+              await backend.commissionLogin.run({data:{username:'__compat_invalid__',password:'not-a-real-password',annoScolastico:'2026/2027'},auth:undefined});
+            } catch (e) {
+              rejectedCorrectly = String(e?.code || '') === 'permission-denied';
+            }
+            if (!rejectedCorrectly) throw new Error('Login fake non rifiutato correttamente');
+            console.log('COMPAT_OK project=mio-sistema-voto account=true token=true handler=true fakeLoginRejected=true');
+          }
+          main().catch(e => { console.error('COMPAT_FAIL', e?.code || e?.name || 'error', e?.message || e); process.exit(1); });
+          NODE
+          node test.js
