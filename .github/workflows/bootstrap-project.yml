@@ -37,9 +37,9 @@ jobs:
         run: |
           set -euo pipefail
           node --check functions/index.js
-          ! grep -R --line-number --fixed-strings 'Levi8602P' index.html functions firestore.rules || false
-          if grep -R --line-number --fixed-strings 'Levi8602P' index.html functions firestore.rules; then exit 1; fi
-          if grep -R --line-number -E 'vote_id_[A-Za-z0-9_]*' index.html functions firestore.rules; then exit 1; fi
+          if grep -n --fixed-strings 'Levi8602P' index.html functions/index.js firestore.rules; then exit 1; fi
+          if grep -n -E 'vote_id_[A-Za-z0-9_]*' index.html functions/index.js firestore.rules; then exit 1; fi
+          echo "Controlli codice operativo superati. Lo script di migrazione può contenere i nomi dei soli campi legacy da eliminare."
 
       - name: Commit progetto completo
         shell: bash
