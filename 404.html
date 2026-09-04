@@ -352,6 +352,7 @@
             referentLogin: httpsCallable(functions, 'referentLogin'),
             getAnonymousBallots: httpsCallable(functions, 'getAnonymousBallots'),
             createStaffAccount: httpsCallable(functions, 'createStaffAccount'),
+            getStaffAccounts: httpsCallable(functions, 'getStaffAccounts'),
             setStaffAccountActive: httpsCallable(functions, 'setStaffAccountActive'),
             saveElectionConfig: httpsCallable(functions, 'saveElectionConfig'),
             ensureReferentKeys: httpsCallable(functions, 'ensureReferentKeys'),
@@ -4676,29 +4677,37 @@ I file sono pronti per essere stampati, aperti offline senza connessione ad Inte
                 <div class="w-full bg-white rounded-2xl shadow border border-slate-200 p-6 animate-fade-in font-semibold">
                     <div class="flex flex-col md:flex-row justify-between gap-4 items-start md:items-center border-b pb-5 mb-5"><div><span class="text-[9px] bg-emerald-700 text-white font-black px-2 py-0.5 rounded uppercase">Gestione Docenti</span><h3 class="text-xl font-black text-slate-800 mt-2">Credenziali area Dirigenza / Vicepresidenza / DSGA / Segreteria</h3><p class="text-[10px] text-slate-500">Le credenziali vengono create e revocate esclusivamente dall'area Commissione/Docenti. Ogni account è vincolato a un ruolo e, se necessario, a una singola classe.</p></div><button onclick="window.refreshManagementAccounts()" class="bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-xl text-xs font-black">Aggiorna elenco</button></div>
                     <div class="grid lg:grid-cols-2 gap-5">
-                        <div class="bg-slate-50 border rounded-2xl p-4"><h4 class="text-xs font-black mb-3">Nuovo account</h4><div class="grid grid-cols-2 gap-2 text-[10px]"><input id="mgmtNewName" placeholder="Nome / ufficio" class="p-2.5 border rounded-xl col-span-2"><input id="mgmtNewUsername" placeholder="Username" class="p-2.5 border rounded-xl"><input id="mgmtNewPassword" placeholder="Password" class="p-2.5 border rounded-xl"><select id="mgmtNewRole" class="p-2.5 border rounded-xl"><option value="DIRIGENTE">DIRIGENTE</option><option value="VICEPRESIDE">VICEPRESIDE</option><option value="DSGA">DSGA</option><option value="SEGRETERIA">SEGRETERIA</option></select><input id="mgmtNewScope" placeholder="Classe (oppure TUTTE)" value="TUTTE" class="p-2.5 border rounded-xl"></div><button onclick="window.createManagementAccount()" class="w-full bg-emerald-700 hover:bg-emerald-800 text-white py-2.5 rounded-xl mt-3 text-xs font-black">Crea credenziale</button></div>
+                        <div class="bg-slate-50 border rounded-2xl p-4"><h4 class="text-xs font-black mb-3">Nuovo account</h4><div class="grid grid-cols-2 gap-2 text-[10px]"><input id="mgmtNewName" placeholder="Nome / ufficio" class="p-2.5 border rounded-xl col-span-2"><input id="mgmtNewUsername" placeholder="Username" autocomplete="off" class="p-2.5 border rounded-xl"><input id="mgmtNewPassword" type="password" autocomplete="new-password" placeholder="Password" class="p-2.5 border rounded-xl"><select id="mgmtNewRole" class="p-2.5 border rounded-xl"><option value="DIRIGENTE">DIRIGENTE</option><option value="VICEPRESIDE">VICEPRESIDE</option><option value="DSGA">DSGA</option><option value="SEGRETERIA">SEGRETERIA</option></select><input id="mgmtNewScope" placeholder="Classe (oppure TUTTE)" value="TUTTE" class="p-2.5 border rounded-xl"></div><div class="mt-3 p-2.5 rounded-xl bg-blue-50 border border-blue-100 text-[10px] text-blue-950"><b>Scadenza automatica:</b> ogni credenziale gestionale è valida fino al <b>${managementDefaultExpiryLabel()}</b>. Dopo tale data il server rifiuta login e operazioni riservate.</div><button onclick="window.createManagementAccount()" class="w-full bg-emerald-700 hover:bg-emerald-800 text-white py-2.5 rounded-xl mt-3 text-xs font-black">Crea credenziale</button></div>
                         <div class="space-y-2">${roleCards.map(r=>`<div class="p-3 border rounded-2xl bg-white flex justify-between items-center"><div><b class="text-xs">${r[0]}</b><div class="text-[9px] text-slate-500">${r[1]}</div></div><i data-lucide="shield-check" class="w-5 h-5 text-emerald-600"></i></div>`).join('')}</div>
                     </div>
                     <div class="mt-6 grid sm:grid-cols-2 lg:grid-cols-4 gap-3"><div class="p-3 bg-blue-50 border border-blue-100 rounded-2xl"><div class="text-[9px] uppercase font-black text-blue-700">Dirigente</div><div id="managementCountDirigente" class="text-xl font-black text-blue-900">—</div></div><div class="p-3 bg-emerald-50 border border-emerald-100 rounded-2xl"><div class="text-[9px] uppercase font-black text-emerald-700">Vicepreside</div><div id="managementCountVice" class="text-xl font-black text-emerald-900">—</div></div><div class="p-3 bg-amber-50 border border-amber-100 rounded-2xl"><div class="text-[9px] uppercase font-black text-amber-700">DSGA</div><div id="managementCountDsga" class="text-xl font-black text-amber-900">—</div></div><div class="p-3 bg-rose-50 border border-rose-100 rounded-2xl"><div class="text-[9px] uppercase font-black text-rose-700">Segreteria</div><div id="managementCountSegreteria" class="text-xl font-black text-rose-900">—</div></div></div><div class="mt-6"><h4 class="text-xs font-black mb-3">Account creati</h4><div id="managementAccountsTable" class="overflow-auto border rounded-2xl"></div></div>
-                    <div class="mt-5 bg-amber-50 border border-amber-200 rounded-2xl p-4 text-[10px] text-amber-950"><b>Nota di sicurezza:</b> gli account gestionali sono autenticati e autorizzati lato server; le password non sono salvate in chiaro e le operazioni privilegiate sono soggette a regole Firestore e audit.</div>
+                    <div class="mt-5 bg-amber-50 border border-amber-200 rounded-2xl p-4 text-[10px] text-amber-950"><b>Nota di sicurezza:</b> gli account gestionali sono autenticati e autorizzati lato server; le password non sono salvate in chiaro, le operazioni privilegiate sono sottoposte ad audit e ogni credenziale scade automaticamente al 31 agosto dell'anno scolastico di riferimento.</div>
                 </div>`;
             lucide.createIcons();
             refreshManagementAccounts();
         }
 
+        function managementDefaultExpiryLabel() {
+            const match = String(configElezioni.annoScolastico || '').match(/^(20\d{2})\/(20\d{2})$/);
+            return match ? `31/08/${match[2]}` : '31 agosto dell’anno scolastico';
+        }
+
         window.refreshManagementAccounts = async function() {
             const box = document.getElementById('managementAccountsTable');
             if (!box) return;
-            const snap = await getDocs(getManagementAccessCollectionRef());
-            const rows = [];
-            snap.forEach(d => rows.push({id:d.id,...d.data()}));
-            const counts = { DIRIGENTE:0, VICEPRESIDE:0, DSGA:0, SEGRETERIA:0 };
-            rows.forEach(r => { if (counts[r.role] !== undefined) counts[r.role]++; });
-            const c1=document.getElementById('managementCountDirigente'); if(c1) c1.textContent=counts.DIRIGENTE;
-            const c2=document.getElementById('managementCountVice'); if(c2) c2.textContent=counts.VICEPRESIDE;
-            const c3=document.getElementById('managementCountDsga'); if(c3) c3.textContent=counts.DSGA;
-            const c4=document.getElementById('managementCountSegreteria'); if(c4) c4.textContent=counts.SEGRETERIA;
-            box.innerHTML = `<table class="w-full text-left text-[10px]"><thead class="bg-slate-50"><tr><th class="p-2.5">Nome</th><th class="p-2.5">Username</th><th class="p-2.5">Ruolo</th><th class="p-2.5">Ambito</th><th class="p-2.5">Stato</th><th class="p-2.5">Azione</th></tr></thead><tbody>${rows.map(r=>`<tr class="border-t"><td class="p-2.5 font-bold">${r.name||'—'}</td><td class="p-2.5 font-mono">${r.username}</td><td class="p-2.5 font-black">${r.role}</td><td class="p-2.5">${r.scopeClass||'TUTTE'}</td><td class="p-2.5">${r.active===false?'DISATTIVO':'ATTIVO'}</td><td class="p-2.5"><button onclick="window.toggleManagementAccount('${r.id}',${r.active===false})" class="px-2 py-1 rounded-lg ${r.active===false?'bg-emerald-100 text-emerald-800':'bg-red-100 text-red-800'} font-black">${r.active===false?'Riattiva':'Disattiva'}</button></td></tr>`).join('')||'<tr><td colspan="6" class="p-6 text-center text-slate-400">Nessun account creato.</td></tr>'}</tbody></table>`;
+            try {
+                const response = await SECURE_API.getStaffAccounts({annoScolastico:configElezioni.annoScolastico});
+                const rows = response.data?.accounts || [];
+                const counts = { DIRIGENTE:0, VICEPRESIDE:0, DSGA:0, SEGRETERIA:0 };
+                rows.forEach(r => { if (counts[r.role] !== undefined) counts[r.role]++; });
+                const c1=document.getElementById('managementCountDirigente'); if(c1) c1.textContent=counts.DIRIGENTE;
+                const c2=document.getElementById('managementCountVice'); if(c2) c2.textContent=counts.VICEPRESIDE;
+                const c3=document.getElementById('managementCountDsga'); if(c3) c3.textContent=counts.DSGA;
+                const c4=document.getElementById('managementCountSegreteria'); if(c4) c4.textContent=counts.SEGRETERIA;
+                box.innerHTML = `<table class="w-full text-left text-[10px]"><thead class="bg-slate-50"><tr><th class="p-2.5">Nome</th><th class="p-2.5">Username</th><th class="p-2.5">Ruolo</th><th class="p-2.5">Ambito</th><th class="p-2.5">Scadenza</th><th class="p-2.5">Stato</th><th class="p-2.5">Azione</th></tr></thead><tbody>${rows.map(r=>`<tr class="border-t ${r.isExpired?'bg-red-50/60':''}"><td class="p-2.5 font-bold">${r.name||'—'}</td><td class="p-2.5 font-mono">${r.username}</td><td class="p-2.5 font-black">${r.role}</td><td class="p-2.5">${r.scopeClass||'TUTTE'}</td><td class="p-2.5 font-bold ${r.isExpired?'text-red-700':'text-slate-700'}">${r.expiresOn||managementDefaultExpiryLabel()}</td><td class="p-2.5 font-black ${r.isExpired?'text-red-700':''}">${r.isExpired?'SCADUTO':(r.active===false?'DISATTIVO':'ATTIVO')}</td><td class="p-2.5">${r.isExpired?'<span class="px-2 py-1 rounded-lg bg-slate-100 text-slate-500 font-black">Scaduta</span>':`<button onclick="window.toggleManagementAccount('${r.id}',${r.active===false})" class="px-2 py-1 rounded-lg ${r.active===false?'bg-emerald-100 text-emerald-800':'bg-red-100 text-red-800'} font-black">${r.active===false?'Riattiva':'Disattiva'}</button>`}</td></tr>`).join('')||'<tr><td colspan="7" class="p-6 text-center text-slate-400">Nessun account creato.</td></tr>'}</tbody></table>`;
+            } catch(e) {
+                box.innerHTML = `<div class="p-5 text-center text-red-600 text-xs font-bold">Impossibile caricare gli account: ${e.message||'accesso non autorizzato'}</div>`;
+            }
         };
 
         window.createManagementAccount = async function() {
@@ -4711,8 +4720,9 @@ I file sono pronti per essere stampati, aperti offline senza connessione ad Inte
             if (password.length < 12) return showNotification('Password troppo breve','Usare una password personale di almeno 12 caratteri.','error');
             if (!['DIRIGENTE','VICEPRESIDE','DSGA','SEGRETERIA'].includes(role)) return showNotification('Ruolo non valido','Selezionare Dirigente, Vicepreside, DSGA o Segreteria.','error');
             try {
-                await SECURE_API.createStaffAccount({name,username,password,role,scopeClass,annoScolastico:configElezioni.annoScolastico});
-                showNotification('Credenziale creata',`Account ${role} creato lato server con derivazione password scrypt e audit amministrativo.`,`success`);
+                const response = await SECURE_API.createStaffAccount({name,username,password,role,scopeClass,annoScolastico:configElezioni.annoScolastico});
+                const expiry = response.data?.expiresOn || managementDefaultExpiryLabel();
+                showNotification('Credenziale creata',`Account ${role} creato. Scadenza automatica: ${expiry}. Dopo tale data la credenziale non sarà più valida.`,`success`);
                 document.getElementById('mgmtNewName').value=''; document.getElementById('mgmtNewUsername').value=''; document.getElementById('mgmtNewPassword').value='';
                 refreshManagementAccounts();
             } catch(e) { showNotification('Errore creazione account',e.message||'Operazione non consentita.','error'); }

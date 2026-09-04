@@ -29,7 +29,9 @@
 - `scrypt` + salt per le password applicative;
 - MFA obbligatoria/recomandata fortemente per GitHub, Google/Firebase e console cloud;
 - vietato trasmettere password via email non protetta o inserirle nei verbali;
-- revoca immediata alla cessazione del ruolo.
+- revoca immediata alla cessazione del ruolo;
+- per **Dirigente, Vicepreside, DSGA e Segreteria** la credenziale applicativa ha scadenza automatica al **31 agosto dell'anno scolastico di riferimento**; dal 1° settembre non è più accettata dal server;
+- la scadenza è registrata lato server e inclusa come claim firmata nelle sessioni gestionali, così anche una sessione già aperta non può superare il termine di validità.
 
 ## Sessioni
 

@@ -27,6 +27,7 @@ const name = arg('name', username).trim();
 const scopeClass = arg('scope', 'TUTTE').trim().toUpperCase();
 const password = process.env.PROVISION_PASSWORD || '';
 const allowed = new Set(['COMMISSIONE','DIRIGENTE','VICEPRESIDE','DSGA','SEGRETERIA']);
+const managementRoles = new Set(['DIRIGENTE','VICEPRESIDE','DSGA','SEGRETERIA']);
 
 if (!/^20\d{2}\/20\d{2}$/.test(year) || !allowed.has(role) || !username || !name) {
   console.error('Argomenti non validi. Specificare --year, --role, --username e --name.');
@@ -48,9 +49,14 @@ if (password.length < 12) {
   const salt = crypto.randomBytes(24).toString('hex');
   const passwordHash = crypto.scryptSync(password, salt, 64).toString('hex');
   const ref = collection.doc();
+  const endYear = Number(year.split('/')[1]);
+  // Scadenza a inizio 1 settembre UTC: il backend applicativo usa Europe/Rome e,
+  // per il provisioning, la policy documentale resta il 31 agosto dell'A.S.
+  const expiresAt = managementRoles.has(role) ? admin.firestore.Timestamp.fromDate(new Date(`${endYear}-09-01T00:00:00+02:00`)) : null;
   await ref.set({
     name, username, passwordHash, passwordSalt: salt, role, scopeClass,
     active: true,
+    ...(expiresAt ? { expiresAt, expiryPolicy: 'FINE_ANNO_SCOLASTICO' } : {}),
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     createdBy: 'OFFLINE_PROVISIONING'
   });

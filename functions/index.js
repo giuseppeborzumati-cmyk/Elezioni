@@ -53,6 +53,14 @@ function requireAuth(request, allowedRoles = []) {
   if (allowedRoles.length && !allowedRoles.includes(role)) {
     throw new HttpsError('permission-denied', 'Ruolo non autorizzato.');
   }
+  // Gli account gestionali sono validi soltanto fino alla scadenza firmata nel token.
+  // L'assenza della claim invalida le vecchie sessioni e forza un nuovo login dopo il deploy.
+  if (MANAGEMENT_ROLES.has(role)) {
+    const staffExpiresAt = Number(request.auth.token.staffExpiresAt || 0);
+    if (!staffExpiresAt || Date.now() >= staffExpiresAt * 1000) {
+      throw new HttpsError('permission-denied', 'Credenziali gestionali scadute. Effettuare un nuovo accesso con credenziali valide.');
+    }
+  }
   return { uid: request.auth.uid, role, claims: request.auth.token };
 }
 
@@ -160,6 +168,37 @@ function legacyPasswordMatches(password, record) {
   return !!record?.passwordHash && !record?.passwordSalt && safeEqualHex(sha256(password), record.passwordHash);
 }
 
+function defaultManagementExpiryDate(year) {
+  const match = String(year || '').match(/^(20\d{2})\/(20\d{2})$/);
+  if (!match || Number(match[2]) !== Number(match[1]) + 1) {
+    throw new HttpsError('invalid-argument', 'Anno scolastico non valido per la scadenza delle credenziali.');
+  }
+  // Valida fino al 31 agosto incluso: scade alle 00:00 del 1 settembre successivo (Europe/Rome).
+  const expiry = parseItalianDate(`01/09/${match[2]}`, '00:00');
+  if (!expiry) throw new HttpsError('internal', 'Impossibile calcolare la scadenza delle credenziali.');
+  return expiry;
+}
+
+function storedExpiryToDate(value) {
+  if (!value) return null;
+  if (typeof value.toDate === 'function') return value.toDate();
+  if (value instanceof Date) return value;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function managementExpiryForRecord(record, year, role) {
+  if (!MANAGEMENT_ROLES.has(role)) return null;
+  return storedExpiryToDate(record?.expiresAt) || defaultManagementExpiryDate(year);
+}
+
+function expiryLabel(expiry) {
+  if (!expiry) return null;
+  return new Intl.DateTimeFormat('it-IT', {
+    timeZone: 'Europe/Rome', day: '2-digit', month: '2-digit', year: 'numeric'
+  }).format(new Date(expiry.getTime() - 1000));
+}
+
 async function authenticateStaff({ username, password, requestedRole, year }) {
   const role = normalize(requestedRole);
   const uname = String(username || '').trim().toLowerCase();
@@ -185,10 +224,24 @@ async function authenticateStaff({ username, password, requestedRole, year }) {
   }
   if (!valid) throw new HttpsError('permission-denied', 'Credenziali non valide.');
 
+  const expiresAt = managementExpiryForRecord(record, year, role);
+  if (expiresAt && Date.now() >= expiresAt.getTime()) {
+    throw new HttpsError('permission-denied', `Credenziali scadute il ${expiryLabel(expiresAt)}. Richiedere una nuova credenziale per l'anno scolastico corrente.`);
+  }
+  // Backfill automatico per gli account gestionali creati prima dell'introduzione della policy.
+  if (expiresAt && !record.expiresAt) {
+    await docSnap.ref.update({
+      expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
+      expiryPolicy: 'FINE_ANNO_SCOLASTICO',
+      expiryPolicyAppliedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  }
+
   const claims = {
     role,
     scopeClass: record.scopeClass || 'TUTTE',
-    staffAccountId: docSnap.id
+    staffAccountId: docSnap.id,
+    ...(expiresAt ? { staffExpiresAt: Math.floor(expiresAt.getTime() / 1000) } : {})
   };
   const customToken = await admin.auth().createCustomToken(`staff-${docSnap.id}-${crypto.randomUUID()}`, claims);
   return {
@@ -198,7 +251,8 @@ async function authenticateStaff({ username, password, requestedRole, year }) {
       name: record.name || uname,
       username: uname,
       role,
-      scopeClass: record.scopeClass || 'TUTTE'
+      scopeClass: record.scopeClass || 'TUTTE',
+      ...(expiresAt ? { expiresAt: expiresAt.toISOString(), expiresOn: expiryLabel(expiresAt) } : {})
     }
   };
 }
@@ -596,14 +650,53 @@ exports.createStaffAccount = onCall({ region: REGION }, async (request) => {
   if (!existing.empty) throw new HttpsError('already-exists', 'Username già esistente.');
   const salt = crypto.randomBytes(24).toString('hex');
   const passwordHash = crypto.scryptSync(password, salt, 64).toString('hex');
+  const expiresAt = MANAGEMENT_ROLES.has(role) ? defaultManagementExpiryDate(year) : null;
   const ref = collection.doc();
   await ref.set({
     name, username, passwordHash, passwordSalt: salt, role, scopeClass,
-    active: true, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    active: true,
+    ...(expiresAt ? {
+      expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
+      expiryPolicy: 'FINE_ANNO_SCOLASTICO'
+    } : {}),
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
     createdBy: actor.uid
   });
-  await auditAdmin(actor, 'CREATE_STAFF_ACCOUNT', { accountId: ref.id, username, role, scopeClass });
-  return { ok: true, id: ref.id };
+  await auditAdmin(actor, 'CREATE_STAFF_ACCOUNT', {
+    accountId: ref.id, username, role, scopeClass,
+    ...(expiresAt ? { expiresOn: expiryLabel(expiresAt) } : {})
+  });
+  return {
+    ok: true,
+    id: ref.id,
+    ...(expiresAt ? { expiresAt: expiresAt.toISOString(), expiresOn: expiryLabel(expiresAt) } : {})
+  };
+});
+
+exports.getStaffAccounts = onCall({ region: REGION }, async (request) => {
+  requireAuth(request, ['COMMISSIONE']);
+  const year = request.data?.annoScolastico;
+  const snap = await yearlyCollection('gestione_accessi', year).get();
+  const accounts = [];
+  for (const docSnap of snap.docs) {
+    const record = docSnap.data() || {};
+    const role = normalize(record.role);
+    if (!MANAGEMENT_ROLES.has(role)) continue;
+    const expiresAt = managementExpiryForRecord(record, year, role);
+    accounts.push({
+      id: docSnap.id,
+      name: record.name || '',
+      username: record.username || '',
+      role,
+      scopeClass: record.scopeClass || 'TUTTE',
+      active: record.active !== false,
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
+      expiresOn: expiresAt ? expiryLabel(expiresAt) : null,
+      isExpired: !!expiresAt && Date.now() >= expiresAt.getTime()
+    });
+  }
+  accounts.sort((a, b) => a.role.localeCompare(b.role) || a.username.localeCompare(b.username));
+  return { accounts };
 });
 
 exports.setStaffAccountActive = onCall({ region: REGION }, async (request) => {
@@ -634,6 +727,8 @@ exports.getSecurityStatus = onCall({ region: REGION }, async (request) => {
       adminAudit: true,
       serverSideValidation: true,
       serverSideVotingWindow: true,
+      managementCredentialExpiry: true,
+      managementCredentialExpiryPolicy: '31_AGOSTO_ANNO_SCOLASTICO',
       sessionExpiryMinutes: 15
     }
   };
