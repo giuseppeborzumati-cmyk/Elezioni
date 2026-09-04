@@ -23,8 +23,8 @@ const YEAR = '2026/2027';
 const USERNAME = 'commissione.presidente';
 const DISPLAY_NAME = 'Presidente Commissione Elettorale';
 const ROLE = 'COMMISSIONE';
-const PASSWORD_SALT = 'e3a331be4e899010231dbf33b52d76b28de0c0519d830d6a';
-const PASSWORD_HASH = 'd92d45c4eb958f167eebcb1e714d6a4d4b531bb3147fc906b523a700ee4d9b2dda7f31bdf16567d3b552a15f1cc86d825a0f2ee8cad858eeaf2a9a45d1531ea0';
+const PASSWORD_SALT = 'f759600a6eb94822d3f6411f05772bb5f98d0fae33919faf';
+const PASSWORD_HASH = 'fecb7feba555566bf2fd17ee6f5ae84c3e793f9fa815794050fe0b2301ecdaab3f526caf7bb4322aff3271efe67e38757ecc08a92982a2857ef360495370575c';
 
 function collectionForYear(year) {
   const suffix = year.replace('/', '_');
@@ -50,7 +50,7 @@ function collectionForYear(year) {
     passwordSalt: PASSWORD_SALT,
     mustChangePassword: true,
     bootstrapAccount: true,
-    bootstrapVersion: '2026-09-04',
+    bootstrapVersion: '2026-09-04b',
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     createdBy: 'SECURE_BOOTSTRAP_DEPLOY'
   });
