@@ -1890,11 +1890,7 @@
                 }
             });
 
-            let sortedCandidates = Object.values(nameCounts)
-                .sort((a, b) => {
-                    if (b.count === a.count) return a.display.localeCompare(b.display);
-                    return b.count - a.count;
-                });
+            let sortedCandidates = sortCandidatesByVotesWithExAequo(Object.values(nameCounts), 'SCRUTINIO');
 
             let eletti = [];
             let rigaSorteggioHTML = '';
@@ -1914,12 +1910,13 @@
                 let tieCandidates = sortedCandidates.slice(1).filter(c => c.count === secondVal);
                 
                 if (tieCandidates.length > 1) {
-                    let sortedWinner = tieCandidates.sort((a,b) => a.display.localeCompare(b.display))[0]; 
+                    const exAequoDrawResult = drawExAequo(tieCandidates, 'SECONDO_RAPPRESENTANTE|' + String(configElezioni.annoScolastico || ''));
+                    let sortedWinner = exAequoDrawResult.ordered[0];
                     eletti.push({ name: sortedWinner.display, count: sortedWinner.count, status: "ELETTO 2 (Ex-Aequo)" });
                     rigaSorteggioHTML = `
                         <div class="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-xl text-[11px] leading-relaxed space-y-1 font-semibold">
                             <p class="font-bold">⚡ Riscontro di Parità (Ex-Aequo):</p>
-                            <p>I candidati ${tieCandidates.map(c => `<strong>${c.display}</strong> (${c.count} voti)`).join(', ')} hanno ottenuto pari voti. Criterio alfabetico applicato per la proclamazione: <strong>${sortedWinner.display}</strong>.</p>
+                            <p>I candidati ${tieCandidates.map(c => `<strong>${c.display}</strong> (${c.count} voti)`).join(', ')} hanno ottenuto pari voti. È stato applicato esclusivamente il sorteggio matematico deterministico previsto: <code>S_seed = (Σ ASCII(Carattere_i)) mod C_p</code>, con <strong>C_p = ${exAequoDrawResult.cp}</strong> e <strong>S_seed = ${exAequoDrawResult.seed}</strong>. Nessun criterio alfabetico è utilizzato. Esito del sorteggio: <strong>${sortedWinner.display}</strong>.</p>
                         </div>
                     `;
                 } else {
@@ -3111,10 +3108,7 @@
 
                 classStuReportHtml += `<table><thead><tr><th>Classe</th><th>Primo Rappresentante (Voti)</th><th>Secondo Rappresentante (Voti)</th></tr></thead><tbody>`;
                 Object.keys(clStuObj).sort().forEach(cl => {
-                    let sCands = Object.values(clStuObj[cl]).sort((a,b) => {
-                        if (b.count === a.count) return a.display.localeCompare(b.display);
-                        return b.count - a.count;
-                    });
+                    let sCands = sortCandidatesByVotesWithExAequo(Object.values(clStuObj[cl]), 'SCRUTINIO');
                     let r1 = sCands[0] ? `${sCands[0].display} (${sCands[0].count} voti)` : "Non eletto";
                     let r2 = sCands[1] ? `${sCands[1].display} (${sCands[1].count} voti)` : "Non eletto";
                     classStuReportHtml += `<tr><td><strong>${cl}</strong></td><td>${r1}</td><td>${r2}</td></tr>`;
@@ -3142,10 +3136,7 @@
 
                 classGenReportHtml += `<table><thead><tr><th>Classe</th><th>Genitori Proclamati Eletti (Preferenze nominali)</th></tr></thead><tbody>`;
                 Object.keys(clGenObj).sort().forEach(cl => {
-                    let sCands = Object.values(clGenObj[cl]).sort((a,b) => {
-                        if (b.count === a.count) return a.display.localeCompare(b.display);
-                        return b.count - a.count;
-                    }).slice(0, 4);
+                    let sCands = sortCandidatesByVotesWithExAequo(Object.values(clGenObj[cl]), 'SCRUTINIO').slice(0, 4);
                     let displayStr = sCands.map(c => `<strong>${c.display}</strong> (${c.count} voti)`).join(', ');
                     classGenReportHtml += `<tr><td><strong>${cl}</strong></td><td>${displayStr || "Nessun genitore eletto"}</td></tr>`;
                 });
@@ -4126,15 +4117,7 @@ I file sono pronti per essere stampati, aperti offline senza connessione ad Inte
                 }
             });
 
-            quotients.sort((a, b) => {
-                if (Math.abs(a.quotient - b.quotient) < 0.0001) {
-                    if (a.votes === b.votes) {
-                        return a.listName.localeCompare(b.listName);
-                    }
-                    return b.votes - a.votes; 
-                }
-                return b.quotient - a.quotient;
-            });
+            quotients = sortQuotientsWithExAequo(quotients, 'ATTRIBUZIONE_SEGGI');
 
             let seatsAllocated = {};
             Object.keys(listsVotes).forEach(k => seatsAllocated[k] = 0);
@@ -4275,6 +4258,123 @@ I file sono pronti per essere stampati, aperti offline senza connessione ad Inte
             return votiDb;
         }
 
+
+        // === EX AEQUO: sorteggio deterministico senza criterio alfabetico ===
+        const EX_AEQUO_CP = 2147483647; // numero primo fisso (2^31 - 1)
+
+        function exAequoAscii(value) {
+            return String(value ?? '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/[^\x20-\x7E]/g, '?')
+                .toUpperCase();
+        }
+
+        function exAequoHash32(value, salt = '') {
+            const s = exAequoAscii(salt + '|' + value);
+            let h = 2166136261 >>> 0;
+            for (let i = 0; i < s.length; i++) {
+                h ^= s.charCodeAt(i);
+                h = Math.imul(h, 16777619) >>> 0;
+            }
+            return h >>> 0;
+        }
+
+        function exAequoLabel(item) {
+            return String(item?.display ?? item?.name ?? item?.listName ?? item?.id ?? '');
+        }
+
+        function exAequoCanonical(items) {
+            return [...items].sort((a, b) => {
+                const la = exAequoLabel(a), lb = exAequoLabel(b);
+                const a1 = exAequoHash32(la, 'A'), b1 = exAequoHash32(lb, 'A');
+                if (a1 !== b1) return a1 - b1;
+                const a2 = exAequoHash32(la, 'B'), b2 = exAequoHash32(lb, 'B');
+                if (a2 !== b2) return a2 - b2;
+                return 0; // nessun fallback alfabetico
+            });
+        }
+
+        function exAequoSeed(items, context = '') {
+            const canonical = exAequoCanonical(items);
+            const source = exAequoAscii(context + '|' + canonical.map(exAequoLabel).join('|'));
+            let sum = 0;
+            for (let i = 0; i < source.length; i++) {
+                sum = (sum + source.charCodeAt(i)) % EX_AEQUO_CP;
+            }
+            return { seed: sum || 1, cp: EX_AEQUO_CP, source, canonical };
+        }
+
+        function exAequoPrng(seed) {
+            let x = (seed >>> 0) || 1;
+            return function() {
+                x ^= (x << 13); x >>>= 0;
+                x ^= (x >>> 17); x >>>= 0;
+                x ^= (x << 5); x >>>= 0;
+                return (x >>> 0) / 4294967296;
+            };
+        }
+
+        function drawExAequo(items, context = '') {
+            const meta = exAequoSeed(items, context);
+            const ordered = [...meta.canonical];
+            const rnd = exAequoPrng(meta.seed);
+            for (let i = ordered.length - 1; i > 0; i--) {
+                const j = Math.floor(rnd() * (i + 1));
+                [ordered[i], ordered[j]] = [ordered[j], ordered[i]];
+            }
+            const audit = {
+                context,
+                formula: 'S_seed = (SUM ASCII(Carattere_i)) mod C_p',
+                cp: meta.cp,
+                seed: meta.seed,
+                partecipanti: meta.canonical.map(exAequoLabel),
+                ordineSorteggiato: ordered.map(exAequoLabel)
+            };
+            window.__EX_AEQUO_AUDIT__ = window.__EX_AEQUO_AUDIT__ || [];
+            const key = JSON.stringify(audit);
+            if (!window.__EX_AEQUO_AUDIT__.some(x => JSON.stringify(x) === key)) window.__EX_AEQUO_AUDIT__.push(audit);
+            return { ordered, seed: meta.seed, cp: meta.cp, audit };
+        }
+
+        function sortCandidatesByVotesWithExAequo(items, context = 'SCRUTINIO') {
+            const groups = new Map();
+            for (const item of items) {
+                const count = Number(item?.count || 0);
+                if (!groups.has(count)) groups.set(count, []);
+                groups.get(count).push(item);
+            }
+            const counts = [...groups.keys()].sort((a, b) => b - a);
+            const out = [];
+            for (const count of counts) {
+                const group = groups.get(count);
+                if (group.length > 1) out.push(...drawExAequo(group, context + '|VOTI=' + count).ordered);
+                else out.push(...group);
+            }
+            return out;
+        }
+
+        function sortQuotientsWithExAequo(items, context = 'ATTRIBUZIONE_SEGGI') {
+            const base = [...items].sort((a, b) => {
+                if (Math.abs(Number(a.quotient) - Number(b.quotient)) >= 0.0001) return Number(b.quotient) - Number(a.quotient);
+                if (Number(a.votes) !== Number(b.votes)) return Number(b.votes) - Number(a.votes);
+                return 0;
+            });
+            const out = [];
+            let i = 0;
+            while (i < base.length) {
+                const group = [base[i]];
+                let j = i + 1;
+                while (j < base.length && Math.abs(Number(base[j].quotient) - Number(base[i].quotient)) < 0.0001 && Number(base[j].votes) === Number(base[i].votes)) {
+                    group.push(base[j]); j++;
+                }
+                if (group.length > 1) out.push(...drawExAequo(group, context + '|Q=' + Number(base[i].quotient).toFixed(8) + '|V=' + Number(base[i].votes)).ordered);
+                else out.push(...group);
+                i = j;
+            }
+            return out;
+        }
+
         async function renderScrutinioTab(container) {
             container.innerHTML = `
                 <div class="text-center p-12 bg-white rounded-2xl shadow w-full">
@@ -4347,10 +4447,7 @@ I file sono pronti per essere stampati, aperti offline senza connessione ad Inte
                     leftVotiEditorHTML = `<div class="p-4 text-center text-xs text-slate-400 italic">Nessun voto caricato nell'Urna per le classi.</div>`;
                 } else {
                     leftVotiEditorHTML = sortedClasses.map(cl => {
-                        let sortedCands = Object.values(classesVoti[cl]).sort((a, b) => {
-                            if (b.count === a.count) return a.display.localeCompare(b.display);
-                            return b.count - a.count;
-                        });
+                        let sortedCands = sortCandidatesByVotesWithExAequo(Object.values(classesVoti[cl]), 'SCRUTINIO');
 
                         return `
                             <div class="border rounded-xl p-3 mb-3 bg-white">
@@ -4470,11 +4567,7 @@ I file sono pronti per essere stampati, aperti offline senza connessione ad Inte
             if (isClasse) {
                 let classesVoti = officialVotiScrutinio.classi[colName] || {};
                 outputHTML = Object.keys(classesVoti).sort().map(cl => {
-                    let candidates = Object.values(classesVoti[cl])
-                        .sort((a,b) => {
-                            if (b.count === a.count) return a.display.localeCompare(b.display);
-                            return b.count - a.count;
-                        });
+                    let candidates = sortCandidatesByVotesWithExAequo(Object.values(classesVoti[cl]), 'SCRUTINIO');
 
                     let eletti = candidates.slice(0, currentSeats);
 
@@ -4768,11 +4861,7 @@ I file sono pronti per essere stampati, aperti offline senza connessione ad Inte
                 if (isClasse) {
                     let classesVoti = officialVotiScrutinio.classi[colName] || {};
                     Object.entries(classesVoti).forEach(([cl, candMap]) => {
-                        let sortedC = Object.values(candMap)
-                            .sort((a,b) => {
-                                if (b.count === a.count) return a.display.localeCompare(b.display);
-                                return b.count - a.count;
-                            })
+                        let sortedC = sortCandidatesByVotesWithExAequo(Object.values(candMap), 'SCRUTINIO')
                             .slice(0, 2);
 
                         sortedC.forEach((c, idx) => {
