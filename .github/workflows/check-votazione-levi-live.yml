@@ -9,7 +9,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Verifica dominio nuovo
+      - name: Verifica dominio nuovo dopo alias esplicito
         run: |
           set -e
           BASE="https://votazione-levi.vercel.app"
