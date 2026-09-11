@@ -56,9 +56,10 @@ function loadBackend() {
         throw new Error('Sorgente backend non riconosciuto.');
       }
       const module = { exports: {} };
+      const firebaseAppCompat = { ...adminApp, initializeApp: ensureFirebaseAdmin };
       const allowedRequire = (id) => {
         if (id === 'firebase-functions/v2/https') return { onCall, HttpsError };
-        if (id === 'firebase-admin/app') return adminApp;
+        if (id === 'firebase-admin/app') return firebaseAppCompat;
         if (id === 'firebase-admin/firestore') return adminFirestore;
         if (id === 'firebase-admin/auth') return adminAuth;
         if (id === 'crypto' || id === 'node:crypto') return crypto;
