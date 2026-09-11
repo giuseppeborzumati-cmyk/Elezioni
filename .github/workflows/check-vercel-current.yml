@@ -1,0 +1,25 @@
+name: Check Vercel Current
+on:
+  push:
+    branches: ["main"]
+    paths: [".github/workflows/check-vercel-current.yml"]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verifica dominio pubblico Vercel
+        run: |
+          for i in {1..18}; do
+            echo "Tentativo $i"
+            BODY=$(curl -sS --max-time 15 https://elezioni-primo-levi-vercel.vercel.app/api/health || true)
+            echo "$BODY"
+            if echo "$BODY" | grep -q '"version":"f25d4d5e"'; then
+              echo "VERCEL_CURRENT_OK"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "VERCEL_ALIAS_NON_AGGIORNATO"
+          exit 1
